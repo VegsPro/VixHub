@@ -147,19 +147,8 @@ class AppViewModel : ViewModel() {
         viewModelScope.launch {
             _loading.value = true
             ApiClient.listImages()
-                .onSuccess { arr ->
-                    val list = mutableListOf<ImageItem>()
-                    for (i in 0 until arr.length()) {
-                        val item = arr.opt(i)
-                        when (item) {
-                            is JSONObject -> {
-                                val id = item.optString("id", item.optString("filename", ""))
-                                val name = item.optString("filename", id)
-                                if (id.isNotBlank()) list.add(ImageItem(id, name))
-                            }
-                            is String -> list.add(ImageItem(item, item))
-                        }
-                    }
+                .onSuccess { pairs ->
+                    val list = pairs.map { (id, name) -> ImageItem(id, name) }
                     _images.value = list
                     showMessage("Загружено ${list.size} фото")
                 }
