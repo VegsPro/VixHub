@@ -441,7 +441,6 @@ fun StatusCard(title: String, value: String, icon: androidx.compose.ui.graphics.
     }
 }
 
-@Composable
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PhotosScreen(vm: AppViewModel) {
