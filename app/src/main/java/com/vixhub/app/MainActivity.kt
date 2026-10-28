@@ -48,6 +48,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import android.app.DownloadManager
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.os.Environment
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -169,6 +175,23 @@ class AppViewModel : ViewModel() {
                 }
                 .onFailure {
                     showMessage("Ошибка загрузки: ${it.message}")
+                }
+            _loading.value = false
+        }
+    }
+
+    fun deletePhoto(id: String) {
+        viewModelScope.launch {
+            _loading.value = true
+            ApiClient.deleteImage(id)
+                .onSuccess {
+                    showMessage("Удалено")
+                    // убираем из локального списка сразу
+                    _images.value = _images.value.filter { it.id != id }
+                    loadImages()
+                }
+                .onFailure {
+                    showMessage("Удаление не поддерживается сервером: ${it.message}")
                 }
             _loading.value = false
         }
@@ -419,10 +442,13 @@ fun StatusCard(title: String, value: String, icon: androidx.compose.ui.graphics.
 }
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
 fun PhotosScreen(vm: AppViewModel) {
     val images by vm.images.collectAsState()
     val context = LocalContext.current
-    var selectedImageId by remember { mutableStateOf<String?>(null) }
+    var previewId by remember { mutableStateOf<String?>(null) }
+    var menuItem by remember { mutableStateOf<AppViewModel.ImageItem?>(null) }
 
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         uri ?: return@rememberLauncherForActivityResult
@@ -434,6 +460,35 @@ fun PhotosScreen(vm: AppViewModel) {
             }
         } catch (e: Exception) {
             vm.showMessage("Ошибка чтения файла: ${e.message}")
+        }
+    }
+
+    fun copyLink(item: AppViewModel.ImageItem) {
+        val url = ApiClient.imageUrl(item.id)
+        val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText("photo_url", url))
+        vm.showMessage("Ссылка скопирована")
+    }
+
+    fun downloadPhoto(item: AppViewModel.ImageItem) {
+        val url = ApiClient.imageUrl(item.id)
+        if (url.isBlank()) {
+            vm.showMessage("URL пустой")
+            return
+        }
+        try {
+            val dm = context.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as DownloadManager
+            val request = DownloadManager.Request(Uri.parse(url))
+                .setTitle(item.filename)
+                .setDescription("Загрузка фото из VixHub")
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, item.filename)
+                .setAllowedOverMetered(true)
+                .setAllowedOverRoaming(true)
+            dm.enqueue(request)
+            vm.showMessage("Скачивание начато")
+        } catch (e: Exception) {
+            vm.showMessage("Ошибка скачивания: ${e.message}")
         }
     }
 
@@ -468,6 +523,7 @@ fun PhotosScreen(vm: AppViewModel) {
                     Icon(Icons.Outlined.PhotoLibrary, null, modifier = Modifier.size(64.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.height(8.dp))
                     Text("Нет фото. Нажмите «Список» или загрузите.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Долгое нажатие — меню действий", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         } else {
@@ -478,36 +534,41 @@ fun PhotosScreen(vm: AppViewModel) {
                 modifier = Modifier.fillMaxSize()
             ) {
                 items(images, key = { it.id }) { item ->
-                    Card(
-                        modifier = Modifier
-                            .aspectRatio(1f)
-                            .clickable { selectedImageId = item.id },
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Box {
-                            AsyncImage(
-                                model = ImageRequest.Builder(context)
-                                    .data(ApiClient.imageUrl(item.id))
-                                    .crossfade(true)
-                                    .build(),
-                                contentDescription = item.filename,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                            Box(
-                                Modifier
-                                    .align(Alignment.BottomStart)
-                                    .fillMaxWidth()
-                                    .background(Color.Black.copy(alpha = 0.55f))
-                                    .padding(6.dp)
-                            ) {
-                                Text(
-                                    item.filename,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color.White,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                    Box {
+                        Card(
+                            modifier = Modifier
+                                .aspectRatio(1f)
+                                .combinedClickable(
+                                    onClick = { previewId = item.id },
+                                    onLongClick = { menuItem = item }
+                                ),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Box {
+                                AsyncImage(
+                                    model = ImageRequest.Builder(context)
+                                        .data(ApiClient.imageUrl(item.id))
+                                        .crossfade(true)
+                                        .build(),
+                                    contentDescription = item.filename,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
                                 )
+                                Box(
+                                    Modifier
+                                        .align(Alignment.BottomStart)
+                                        .fillMaxWidth()
+                                        .background(Color.Black.copy(alpha = 0.55f))
+                                        .padding(6.dp)
+                                ) {
+                                    Text(
+                                        item.filename,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color.White,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             }
                         }
                     }
@@ -516,13 +577,70 @@ fun PhotosScreen(vm: AppViewModel) {
         }
     }
 
-    if (selectedImageId != null) {
+    // Меню по долгому нажатию
+    if (menuItem != null) {
+        val item = menuItem!!
         AlertDialog(
-            onDismissRequest = { selectedImageId = null },
+            onDismissRequest = { menuItem = null },
+            title = {
+                Text(
+                    item.filename,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(
+                        onClick = {
+                            downloadPhoto(item)
+                            menuItem = null
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.Download, null)
+                        Spacer(Modifier.width(12.dp))
+                        Text("Скачать", modifier = Modifier.weight(1f))
+                    }
+                    TextButton(
+                        onClick = {
+                            copyLink(item)
+                            menuItem = null
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.Link, null)
+                        Spacer(Modifier.width(12.dp))
+                        Text("Скопировать ссылку", modifier = Modifier.weight(1f))
+                    }
+                    TextButton(
+                        onClick = {
+                            vm.deletePhoto(item.id)
+                            menuItem = null
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                    ) {
+                        Icon(Icons.Default.Delete, null)
+                        Spacer(Modifier.width(12.dp))
+                        Text("Удалить", modifier = Modifier.weight(1f))
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { menuItem = null }) { Text("Отмена") }
+            }
+        )
+    }
+
+    // Превью по обычному тапу
+    if (previewId != null) {
+        AlertDialog(
+            onDismissRequest = { previewId = null },
             title = { Text("Фото") },
             text = {
                 AsyncImage(
-                    model = ApiClient.imageUrl(selectedImageId!!),
+                    model = ApiClient.imageUrl(previewId!!),
                     contentDescription = null,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -531,7 +649,7 @@ fun PhotosScreen(vm: AppViewModel) {
                 )
             },
             confirmButton = {
-                TextButton(onClick = { selectedImageId = null }) { Text("Закрыть") }
+                TextButton(onClick = { previewId = null }) { Text("Закрыть") }
             }
         )
     }

@@ -136,6 +136,38 @@ object ApiClient {
         return if (baseUrl.isEmpty()) "" else "$baseUrl/image/$id"
     }
 
+    suspend fun deleteImage(id: String): Result<String> = withContext(Dispatchers.IO) {
+        if (baseUrl.isEmpty()) return@withContext Result.failure(Exception("URL не загружен"))
+        if (id.isBlank()) return@withContext Result.failure(Exception("Пустой id"))
+        try {
+            // Пробуем несколько возможных эндпоинтов
+            val candidates = listOf(
+                "$baseUrl/image/$id",
+                "$baseUrl/images/$id",
+                "$baseUrl/upload/$id"
+            )
+            var lastError = "Не удалось удалить"
+            for (url in candidates) {
+                val request = authRequest(url).delete().build()
+                client.newCall(request).execute().use { response ->
+                    val text = response.body?.string() ?: ""
+                    if (response.isSuccessful) {
+                        return@withContext Result.success(text.ifBlank { "OK" })
+                    }
+                    // 405 = method not allowed, 404 = not found — пробуем следующий
+                    if (response.code != 404 && response.code != 405) {
+                        lastError = "HTTP ${response.code}: $text"
+                    } else {
+                        lastError = "HTTP ${response.code}: $text"
+                    }
+                }
+            }
+            Result.failure(Exception(lastError))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     // --- Database ---
     suspend fun dbGet(name: String, path: String = ""): Result<String> = withContext(Dispatchers.IO) {
         if (baseUrl.isEmpty()) return@withContext Result.failure(Exception("URL не загружен"))
