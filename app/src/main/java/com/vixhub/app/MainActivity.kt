@@ -184,14 +184,13 @@ class AppViewModel : ViewModel() {
         viewModelScope.launch {
             _loading.value = true
             ApiClient.deleteImage(id)
-                .onSuccess {
-                    showMessage("Удалено")
-                    // убираем из локального списка сразу
+                .onSuccess { msg ->
+                    showMessage(msg.ifBlank { "Фото удалено" })
                     _images.value = _images.value.filter { it.id != id }
                     loadImages()
                 }
                 .onFailure {
-                    showMessage("Удаление не поддерживается сервером: ${it.message}")
+                    showMessage("Ошибка удаления: ${it.message}")
                 }
             _loading.value = false
         }

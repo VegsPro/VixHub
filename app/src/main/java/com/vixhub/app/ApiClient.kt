@@ -97,6 +97,12 @@ object ApiClient {
             }
         }
 
+    /**
+     * Возвращает список пар (photo_id, filename).
+     * photo_id — ключ в log.json (нужен для DELETE).
+     * filename — реальное имя файла на диске (для отображения).
+     * GET /image/ работает и с ключом, и с filename.
+     */
     suspend fun listImages(): Result<List<Pair<String, String>>> = withContext(Dispatchers.IO) {
         if (baseUrl.isEmpty()) return@withContext Result.failure(Exception("URL не загружен"))
         try {
@@ -109,7 +115,7 @@ object ApiClient {
                 val list = mutableListOf<Pair<String, String>>()
                 val root = JSONObject(text)
 
-                // Формат сервера: {"count":N,"images":{key:filename,...},"status":"ok"}
+                // Формат: {"count":N,"images":{photo_id:filename,...},"status":"ok"}
                 val imagesObj: JSONObject = when {
                     root.has("images") && root.opt("images") is JSONObject ->
                         root.getJSONObject("images")
@@ -118,13 +124,13 @@ object ApiClient {
 
                 val keys = imagesObj.keys()
                 while (keys.hasNext()) {
-                    val key = keys.next()
-                    val filename = imagesObj.optString(key, key)
-                    // /image/<id> принимает filename (значение)
-                    val id = filename.ifBlank { key }
-                    if (id.isNotBlank()) list.add(id to filename)
+                    val photoId = keys.next()
+                    val filename = imagesObj.optString(photoId, photoId)
+                    if (photoId.isNotBlank()) {
+                        list.add(photoId to filename)
+                    }
                 }
-                list.sortBy { it.second }
+                list.sortByDescending { it.second } // новые сверху (по имени с timestamp)
                 Result.success(list)
             }
         } catch (e: Exception) {
@@ -136,33 +142,30 @@ object ApiClient {
         return if (baseUrl.isEmpty()) "" else "$baseUrl/image/$id"
     }
 
-    suspend fun deleteImage(id: String): Result<String> = withContext(Dispatchers.IO) {
+    suspend fun deleteImage(photoId: String): Result<String> = withContext(Dispatchers.IO) {
         if (baseUrl.isEmpty()) return@withContext Result.failure(Exception("URL не загружен"))
-        if (id.isBlank()) return@withContext Result.failure(Exception("Пустой id"))
+        if (photoId.isBlank()) return@withContext Result.failure(Exception("Пустой id"))
         try {
-            // Пробуем несколько возможных эндпоинтов
-            val candidates = listOf(
-                "$baseUrl/image/$id",
-                "$baseUrl/images/$id",
-                "$baseUrl/upload/$id"
-            )
-            var lastError = "Не удалось удалить"
-            for (url in candidates) {
-                val request = authRequest(url).delete().build()
-                client.newCall(request).execute().use { response ->
-                    val text = response.body?.string() ?: ""
-                    if (response.isSuccessful) {
-                        return@withContext Result.success(text.ifBlank { "OK" })
+            // DELETE /image/<photo_id> — photo_id это КЛЮЧ из log.json, не filename
+            val request = authRequest("$baseUrl/image/$photoId").delete().build()
+            client.newCall(request).execute().use { response ->
+                val text = response.body?.string() ?: ""
+                if (response.isSuccessful) {
+                    val msg = try {
+                        JSONObject(text).optString("message", "Удалено")
+                    } catch (_: Exception) {
+                        text.ifBlank { "Удалено" }
                     }
-                    // 405 = method not allowed, 404 = not found — пробуем следующий
-                    if (response.code != 404 && response.code != 405) {
-                        lastError = "HTTP ${response.code}: $text"
-                    } else {
-                        lastError = "HTTP ${response.code}: $text"
+                    Result.success(msg)
+                } else {
+                    val msg = try {
+                        JSONObject(text).optString("message", text)
+                    } catch (_: Exception) {
+                        text
                     }
+                    Result.failure(Exception("HTTP ${response.code}: $msg"))
                 }
             }
-            Result.failure(Exception(lastError))
         } catch (e: Exception) {
             Result.failure(e)
         }
