@@ -74,6 +74,7 @@ sealed class Tab(val title: String, val icon: androidx.compose.ui.graphics.vecto
     data object Photos : Tab("Фото", Icons.Filled.PhotoLibrary)
     data object Database : Tab("База", Icons.Filled.Storage)
     data object Scripts : Tab("Скрипты", Icons.Filled.Code)
+    data object Server : Tab("Сервер", Icons.Filled.CloudUpload)
 }
 
 class AppViewModel : ViewModel() {
@@ -272,6 +273,23 @@ class AppViewModel : ViewModel() {
         }
     }
 
+    fun updateServer(secret: String, bytes: ByteArray, filename: String) {
+        viewModelScope.launch {
+            _loading.value = true
+            ApiClient.updateServer(secret, bytes)
+                .onSuccess { msg ->
+                    showMessage(msg)
+                    // после рестарта URL может смениться — обновим через пару секунд
+                    kotlinx.coroutines.delay(2500)
+                    refreshUrlAndHealth()
+                }
+                .onFailure {
+                    showMessage("Ошибка обновления: ${it.message}")
+                }
+            _loading.value = false
+        }
+    }
+
     private fun prettyJson(raw: String): String {
         return try {
             when {
@@ -289,7 +307,7 @@ class AppViewModel : ViewModel() {
 @Composable
 fun VixHubApp(vm: AppViewModel = viewModel()) {
     var selectedTab by remember { mutableIntStateOf(0) }
-    val tabs = listOf(Tab.Status, Tab.Photos, Tab.Database, Tab.Scripts)
+    val tabs = listOf(Tab.Status, Tab.Photos, Tab.Database, Tab.Scripts, Tab.Server)
     val loading by vm.loading.collectAsState()
     val message by vm.message.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -325,13 +343,30 @@ fun VixHubApp(vm: AppViewModel = viewModel()) {
             )
         },
         bottomBar = {
-            NavigationBar {
+            NavigationBar(
+                containerColor = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.onSurface,
+                tonalElevation = 0.dp
+            ) {
                 tabs.forEachIndexed { index, tab ->
                     NavigationBarItem(
                         selected = selectedTab == index,
                         onClick = { selectedTab = index },
                         icon = { Icon(tab.icon, contentDescription = tab.title) },
-                        label = { Text(tab.title) }
+                        label = {
+                            Text(
+                                tab.title,
+                                maxLines = 1,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        },
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = MaterialTheme.colorScheme.primary,
+                            selectedTextColor = MaterialTheme.colorScheme.primary,
+                            indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     )
                 }
             }
@@ -349,6 +384,7 @@ fun VixHubApp(vm: AppViewModel = viewModel()) {
                 1 -> PhotosScreen(vm)
                 2 -> DatabaseScreen(vm)
                 3 -> ScriptsScreen(vm)
+                4 -> ServerUpdateScreen(vm)
             }
         }
     }
@@ -830,5 +866,138 @@ fun ScriptsScreen(vm: AppViewModel) {
                 }
             }
         }
+    }
+}
+
+
+@Composable
+fun ServerUpdateScreen(vm: AppViewModel) {
+    val context = LocalContext.current
+    var secret by remember { mutableStateOf("") }
+    var selectedName by remember { mutableStateOf<String?>(null) }
+    var selectedBytes by remember { mutableStateOf<ByteArray?>(null) }
+    var confirmOpen by remember { mutableStateOf(false) }
+
+    val pickPy = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        uri ?: return@rememberLauncherForActivityResult
+        try {
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                selectedBytes = stream.readBytes()
+                selectedName = uri.lastPathSegment?.substringAfterLast('/') ?: "server.py"
+            }
+        } catch (e: Exception) {
+            vm.showMessage("Ошибка файла: ${e.message}")
+        }
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Text(
+            "Обновление server.py",
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            "Загружает новый код на сервер. Перед записью сервер проверяет синтаксис (compile). " +
+                "При успехе создаётся server.py.bak и через ~1.5 сек процесс перезапускается.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        OutlinedTextField(
+            value = secret,
+            onValueChange = { secret = it },
+            label = { Text("Secret-код") },
+            placeholder = { Text("секрет из URL ?secret=") },
+            singleLine = true,
+            visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Файл server.py", fontWeight = FontWeight.SemiBold)
+                Text(
+                    selectedName?.let { "$it (${selectedBytes?.size ?: 0} байт)" } ?: "Файл не выбран",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (selectedName == null) MaterialTheme.colorScheme.onSurfaceVariant
+                    else MaterialTheme.colorScheme.primary
+                )
+                OutlinedButton(
+                    onClick = { pickPy.launch("*/*") },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.AttachFile, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Выбрать .py")
+                }
+            }
+        }
+
+        Button(
+            onClick = {
+                when {
+                    secret.isBlank() -> vm.showMessage("Укажите secret")
+                    selectedBytes == null || selectedBytes!!.isEmpty() -> vm.showMessage("Выберите файл")
+                    else -> confirmOpen = true
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = secret.isNotBlank() && selectedBytes != null
+        ) {
+            Icon(Icons.Default.CloudUpload, null)
+            Spacer(Modifier.width(8.dp))
+            Text("Отправить и перезапустить")
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
+        ) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Как это работает", fontWeight = FontWeight.SemiBold)
+                Text("1. POST /update_server?secret=… + Bearer + тело файла", style = MaterialTheme.typography.bodySmall)
+                Text("2. Сервер проверяет secret и compile()", style = MaterialTheme.typography.bodySmall)
+                Text("3. Бэкап → запись → ответ 200", style = MaterialTheme.typography.bodySmall)
+                Text("4. Через 1.5 сек os.execv — процесс перезапускается", style = MaterialTheme.typography.bodySmall)
+                Text(
+                    "После рестарта URL туннеля может измениться — приложение само обновит его из Firebase.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
+    }
+
+    if (confirmOpen) {
+        AlertDialog(
+            onDismissRequest = { confirmOpen = false },
+            title = { Text("Подтвердите обновление") },
+            text = {
+                Text(
+                    "Сервер будет перезапущен с файлом «${selectedName}». " +
+                        "При синтаксической ошибке обновление отклонят. Продолжить?"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmOpen = false
+                        vm.updateServer(secret.trim(), selectedBytes!!, selectedName ?: "server.py")
+                    }
+                ) { Text("Обновить") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmOpen = false }) { Text("Отмена") }
+            }
+        )
     }
 }

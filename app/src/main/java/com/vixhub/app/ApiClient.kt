@@ -273,4 +273,35 @@ object ApiClient {
             Result.failure(e)
         }
     }
+
+    suspend fun updateServer(secret: String, bytes: ByteArray): Result<String> = withContext(Dispatchers.IO) {
+        if (baseUrl.isEmpty()) return@withContext Result.failure(Exception("URL не загружен"))
+        if (secret.isBlank()) return@withContext Result.failure(Exception("Укажите secret"))
+        if (bytes.isEmpty()) return@withContext Result.failure(Exception("Пустой файл"))
+        try {
+            val url = "$baseUrl/update_server?secret=${java.net.URLEncoder.encode(secret, "UTF-8")}"
+            val body = bytes.toRequestBody("text/x-python; charset=utf-8".toMediaType())
+            val request = authRequest(url).post(body).build()
+            client.newCall(request).execute().use { response ->
+                val text = response.body?.string() ?: ""
+                if (response.isSuccessful) {
+                    val msg = try {
+                        JSONObject(text).optString("message", text)
+                    } catch (_: Exception) {
+                        text.ifBlank { "OK" }
+                    }
+                    Result.success(msg)
+                } else {
+                    val msg = try {
+                        JSONObject(text).optString("message", text)
+                    } catch (_: Exception) {
+                        text
+                    }
+                    Result.failure(Exception("HTTP ${response.code}: $msg"))
+                }
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 }
