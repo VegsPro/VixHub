@@ -386,6 +386,33 @@ object ApiClient {
         }
     }
 
+
+    suspend fun downloadBytes(folder: String, filename: String, folderKey: String?): Result<ByteArray> =
+        withContext(Dispatchers.IO) {
+            try {
+                val url = downloadUrl(folder, filename, folderKey)
+                if (url.isBlank()) return@withContext Result.failure(Exception("URL пустой"))
+                val request = authBuilder(url, folderKey).get().build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        val text = response.body?.string() ?: ""
+                        return@use Result.failure(parseError(response.code, text))
+                    }
+                    val bytes = response.body?.bytes() ?: ByteArray(0)
+                    Result.success(bytes)
+                }
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+
+    suspend fun downloadText(folder: String, filename: String, folderKey: String?): Result<String> =
+        withContext(Dispatchers.IO) {
+            downloadBytes(folder, filename, folderKey).mapCatching { bytes ->
+                bytes.toString(Charsets.UTF_8)
+            }
+        }
+
     suspend fun updateServer(secret: String, bytes: ByteArray): Result<String> = withContext(Dispatchers.IO) {
         try {
             val base = requireUrl()
