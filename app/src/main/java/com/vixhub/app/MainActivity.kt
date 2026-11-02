@@ -39,6 +39,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.vixhub.app.ui.theme.VixHubTheme
+import android.os.Build
+import android.Manifest
+import androidx.core.content.ContextCompat
+import android.content.pm.PackageManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -528,17 +532,31 @@ fun StorageScreen(vm: AppViewModel) {
     var deleteGroupName by remember { mutableStateOf<String?>(null) }
     var fileMenu by remember { mutableStateOf<ApiClient.FileInfo?>(null) }
 
-    val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
-        uri ?: return@rememberLauncherForActivityResult
-        try {
-            context.contentResolver.openInputStream(uri)?.use { stream ->
-                val bytes = stream.readBytes()
-                val name = uri.lastPathSegment?.substringAfterLast('/')
-                    ?: "file_${System.currentTimeMillis()}"
-                vm.uploadToFolder(name, bytes)
+    val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris: List<Uri> ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        val folder = currentFolder
+        if (folder.isNullOrBlank()) {
+            vm.showMessage("Папка не открыта")
+            return@rememberLauncherForActivityResult
+        }
+        // Android 13+: разрешение на уведомления
+        if (Build.VERSION.SDK_INT >= 33) {
+            val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                // всё равно стартуем — уведомление может не показаться без permission
             }
-        } catch (e: Exception) {
-            vm.showMessage("Ошибка файла: ${e.message}")
+        }
+        UploadService.start(context, folder, vm.folderKey(folder), uris)
+        vm.showMessage("Загрузка ${uris.size} файл(ов) в фоне…")
+        // обновим список через паузу (сервис работает независимо)
+    }
+
+    val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { /* ignore */ }
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= 33) {
+            val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+            if (!granted) notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
@@ -632,13 +650,18 @@ fun StorageScreen(vm: AppViewModel) {
             }
             Spacer(Modifier.height(8.dp))
             Button(
-                onClick = { pickFile.launch("*/*") },
+                onClick = { pickFiles.launch("*/*") },
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Icon(Icons.Default.Upload, null)
                 Spacer(Modifier.width(8.dp))
-                Text("Загрузить файл (до 200 МБ)")
+                Text("Загрузить файлы (до 200 МБ)")
             }
+            Text(
+                "Можно выбрать несколько — загрузка по очереди в фоне, прогресс в уведомлении (3/7).",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             Spacer(Modifier.height(12.dp))
 
             if (files.isEmpty()) {
