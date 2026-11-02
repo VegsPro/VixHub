@@ -3,12 +3,12 @@ package com.vixhub.app
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
 object ApiClient {
@@ -18,8 +18,8 @@ object ApiClient {
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
-            .writeTimeout(60, TimeUnit.SECONDS)
+            .readTimeout(5, TimeUnit.MINUTES)
+            .writeTimeout(5, TimeUnit.MINUTES)
             .build()
     }
 
@@ -48,89 +48,104 @@ object ApiClient {
 
     fun getBaseUrl(): String = baseUrl
 
-    private fun authRequest(url: String): Request.Builder {
-        return Request.Builder()
+    private fun authBuilder(url: String, folderKey: String? = null): Request.Builder {
+        val b = Request.Builder()
             .url(url)
             .addHeader("Authorization", "Bearer $TOKEN")
+        if (!folderKey.isNullOrBlank()) {
+            b.addHeader("X-Folder-Key", folderKey)
+        }
+        return b
+    }
+
+    private fun parseError(code: Int, text: String): Exception {
+        val msg = try {
+            JSONObject(text).optString("message", text)
+        } catch (_: Exception) {
+            text.ifBlank { "HTTP $code" }
+        }
+        return Exception("HTTP $code: $msg")
+    }
+
+    private fun requireUrl(): String {
+        if (baseUrl.isEmpty()) throw Exception("URL не загружен")
+        return baseUrl
     }
 
     suspend fun health(): Result<String> = withContext(Dispatchers.IO) {
-        if (baseUrl.isEmpty()) return@withContext Result.failure(Exception("URL не загружен"))
         try {
-            val request = Request.Builder().url("$baseUrl/health").get().build()
+            val base = requireUrl()
+            val request = Request.Builder().url("$base/health").get().build()
             client.newCall(request).execute().use { response ->
                 val body = response.body?.string() ?: ""
                 if (response.isSuccessful) Result.success(body)
-                else Result.failure(Exception("HTTP ${response.code}: $body"))
+                else Result.failure(parseError(response.code, body))
             }
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
 
-    // --- Photos ---
-    suspend fun uploadPhoto(bytes: ByteArray, filename: String = "photo.jpg"): Result<JSONObject> =
-        withContext(Dispatchers.IO) {
-            if (baseUrl.isEmpty()) return@withContext Result.failure(Exception("URL не загружен"))
-            try {
-                val body = MultipartBody.Builder()
-                    .setType(MultipartBody.FORM)
-                    .addFormDataPart(
-                        "file",
-                        filename,
-                        bytes.toRequestBody("application/octet-stream".toMediaType())
-                    )
-                    .build()
-                val request = authRequest("$baseUrl/upload")
-                    .post(body)
-                    .build()
-                client.newCall(request).execute().use { response ->
-                    val text = response.body?.string() ?: ""
-                    if (response.isSuccessful) {
-                        Result.success(JSONObject(text))
-                    } else {
-                        Result.failure(Exception("HTTP ${response.code}: $text"))
-                    }
-                }
-            } catch (e: Exception) {
-                Result.failure(e)
-            }
-        }
+    data class GroupInfo(val name: String, val protected: Boolean)
+    data class FileInfo(val name: String, val size: Long? = null)
 
-    /**
-     * Возвращает список пар (photo_id, filename).
-     * photo_id — ключ в log.json (нужен для DELETE).
-     * filename — реальное имя файла на диске (для отображения).
-     * GET /image/ работает и с ключом, и с filename.
-     */
-    suspend fun listImages(): Result<List<Pair<String, String>>> = withContext(Dispatchers.IO) {
-        if (baseUrl.isEmpty()) return@withContext Result.failure(Exception("URL не загружен"))
+    suspend fun listGroups(): Result<List<GroupInfo>> = withContext(Dispatchers.IO) {
         try {
-            val request = authRequest("$baseUrl/images").get().build()
+            val base = requireUrl()
+            val request = authBuilder("$base/groups").get().build()
             client.newCall(request).execute().use { response ->
-                val text = response.body?.string() ?: "{}"
-                if (!response.isSuccessful) {
-                    return@use Result.failure(Exception("HTTP ${response.code}: $text"))
-                }
-                val list = mutableListOf<Pair<String, String>>()
-                val root = JSONObject(text)
-
-                // Формат: {"count":N,"images":{photo_id:filename,...},"status":"ok"}
-                val imagesObj: JSONObject = when {
-                    root.has("images") && root.opt("images") is JSONObject ->
-                        root.getJSONObject("images")
-                    else -> root
-                }
-
-                val keys = imagesObj.keys()
-                while (keys.hasNext()) {
-                    val photoId = keys.next()
-                    val filename = imagesObj.optString(photoId, photoId)
-                    if (photoId.isNotBlank()) {
-                        list.add(photoId to filename)
+                val text = response.body?.string() ?: "[]"
+                if (!response.isSuccessful) return@use Result.failure(parseError(response.code, text))
+                val list = mutableListOf<GroupInfo>()
+                val trimmed = text.trim()
+                when {
+                    trimmed.startsWith("[") -> {
+                        val arr = JSONArray(trimmed)
+                        for (i in 0 until arr.length()) {
+                            when (val item = arr.opt(i)) {
+                                is JSONObject -> {
+                                    val name = item.optString("name")
+                                        .ifBlank { item.optString("id") }
+                                        .ifBlank { item.optString("folder") }
+                                    val prot = item.optBoolean("protected", item.optBoolean("password", false))
+                                    if (name.isNotBlank()) list.add(GroupInfo(name, prot))
+                                }
+                                is String -> list.add(GroupInfo(item, false))
+                            }
+                        }
+                    }
+                    trimmed.startsWith("{") -> {
+                        val obj = JSONObject(trimmed)
+                        val arr = when {
+                            obj.has("groups") -> obj.optJSONArray("groups")
+                            obj.has("data") -> obj.optJSONArray("data")
+                            obj.has("folders") -> obj.optJSONArray("folders")
+                            else -> null
+                        }
+                        if (arr != null) {
+                            for (i in 0 until arr.length()) {
+                                val item = arr.optJSONObject(i) ?: continue
+                                val name = item.optString("name").ifBlank { item.optString("id") }
+                                val prot = item.optBoolean("protected", false)
+                                if (name.isNotBlank()) list.add(GroupInfo(name, prot))
+                            }
+                        } else {
+                            val keys = obj.keys()
+                            while (keys.hasNext()) {
+                                val k = keys.next()
+                                if (k in listOf("status", "message", "count")) continue
+                                val v = obj.opt(k)
+                                val prot = when (v) {
+                                    is JSONObject -> v.optBoolean("protected", false)
+                                    is Boolean -> v
+                                    else -> false
+                                }
+                                list.add(GroupInfo(k, prot))
+                            }
+                        }
                     }
                 }
-                list.sortByDescending { it.second } // новые сверху (по имени с timestamp)
+                list.sortBy { it.name.lowercase() }
                 Result.success(list)
             }
         } catch (e: Exception) {
@@ -138,108 +153,207 @@ object ApiClient {
         }
     }
 
-    fun imageUrl(id: String): String {
-        return if (baseUrl.isEmpty()) "" else "$baseUrl/image/$id"
-    }
-
-    suspend fun deleteImage(photoId: String): Result<String> = withContext(Dispatchers.IO) {
-        if (baseUrl.isEmpty()) return@withContext Result.failure(Exception("URL не загружен"))
-        if (photoId.isBlank()) return@withContext Result.failure(Exception("Пустой id"))
+    suspend fun createGroup(name: String, password: String?): Result<String> = withContext(Dispatchers.IO) {
         try {
-            // DELETE /image/<photo_id> — photo_id это КЛЮЧ из log.json, не filename
-            val request = authRequest("$baseUrl/image/$photoId").delete().build()
+            val base = requireUrl()
+            val bodyJson = JSONObject().put("name", name)
+            if (!password.isNullOrBlank()) bodyJson.put("password", password)
+            val body = bodyJson.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+            val request = authBuilder("$base/new_group").post(body).build()
             client.newCall(request).execute().use { response ->
                 val text = response.body?.string() ?: ""
                 if (response.isSuccessful) {
-                    val msg = try {
-                        JSONObject(text).optString("message", "Удалено")
-                    } catch (_: Exception) {
-                        text.ifBlank { "Удалено" }
-                    }
+                    val msg = try { JSONObject(text).optString("message", "Папка создана") } catch (_: Exception) { text.ifBlank { "Папка создана" } }
                     Result.success(msg)
-                } else {
-                    val msg = try {
-                        JSONObject(text).optString("message", text)
-                    } catch (_: Exception) {
-                        text
+                } else Result.failure(parseError(response.code, text))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteGroup(name: String): Result<String> = withContext(Dispatchers.IO) {
+        try {
+            val base = requireUrl()
+            val enc = URLEncoder.encode(name, "UTF-8")
+            val request = authBuilder("$base/group/$enc").delete().build()
+            client.newCall(request).execute().use { response ->
+                val text = response.body?.string() ?: ""
+                if (response.isSuccessful) {
+                    val msg = try { JSONObject(text).optString("message", "Папка удалена") } catch (_: Exception) { text.ifBlank { "Папка удалена" } }
+                    Result.success(msg)
+                } else Result.failure(parseError(response.code, text))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun listFiles(folder: String, folderKey: String?): Result<List<FileInfo>> =
+        withContext(Dispatchers.IO) {
+            try {
+                val base = requireUrl()
+                val enc = URLEncoder.encode(folder, "UTF-8")
+                val request = authBuilder("$base/list/$enc", folderKey).get().build()
+                client.newCall(request).execute().use { response ->
+                    val text = response.body?.string() ?: "[]"
+                    if (!response.isSuccessful) return@use Result.failure(parseError(response.code, text))
+                    val list = mutableListOf<FileInfo>()
+                    val trimmed = text.trim()
+                    when {
+                        trimmed.startsWith("[") -> {
+                            val arr = JSONArray(trimmed)
+                            for (i in 0 until arr.length()) {
+                                when (val item = arr.opt(i)) {
+                                    is JSONObject -> {
+                                        val n = item.optString("name").ifBlank { item.optString("filename") }.ifBlank { item.optString("file") }
+                                        val sz = if (item.has("size")) item.optLong("size") else null
+                                        if (n.isNotBlank()) list.add(FileInfo(n, sz))
+                                    }
+                                    is String -> list.add(FileInfo(item))
+                                }
+                            }
+                        }
+                        trimmed.startsWith("{") -> {
+                            val obj = JSONObject(trimmed)
+                            val arr = obj.optJSONArray("files") ?: obj.optJSONArray("data") ?: obj.optJSONArray("list")
+                            if (arr != null) {
+                                for (i in 0 until arr.length()) {
+                                    when (val item = arr.opt(i)) {
+                                        is JSONObject -> {
+                                            val n = item.optString("name").ifBlank { item.optString("filename") }
+                                            val sz = if (item.has("size")) item.optLong("size") else null
+                                            if (n.isNotBlank()) list.add(FileInfo(n, sz))
+                                        }
+                                        is String -> list.add(FileInfo(item))
+                                    }
+                                }
+                            } else {
+                                val keys = obj.keys()
+                                while (keys.hasNext()) {
+                                    val k = keys.next()
+                                    if (k in listOf("status", "message", "count", "protected")) continue
+                                    list.add(FileInfo(k))
+                                }
+                            }
+                        }
                     }
-                    Result.failure(Exception("HTTP ${response.code}: $msg"))
+                    list.sortBy { it.name.lowercase() }
+                    Result.success(list)
                 }
+            } catch (e: Exception) {
+                Result.failure(e)
             }
-        } catch (e: Exception) {
-            Result.failure(e)
         }
+
+    suspend fun uploadFile(folder: String, filename: String, bytes: ByteArray, folderKey: String?): Result<String> =
+        withContext(Dispatchers.IO) {
+            try {
+                val base = requireUrl()
+                val encFolder = URLEncoder.encode(folder, "UTF-8")
+                val encName = URLEncoder.encode(filename, "UTF-8")
+                val url = "$base/upload/$encFolder?filename=$encName"
+                val body = bytes.toRequestBody("application/octet-stream".toMediaType())
+                val request = authBuilder(url, folderKey).post(body).build()
+                client.newCall(request).execute().use { response ->
+                    val text = response.body?.string() ?: ""
+                    if (response.isSuccessful) {
+                        val msg = try { JSONObject(text).optString("message", "Загружено") } catch (_: Exception) { text.ifBlank { "Загружено" } }
+                        Result.success(msg)
+                    } else Result.failure(parseError(response.code, text))
+                }
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+
+    fun downloadUrl(folder: String, filename: String, folderKey: String?): String {
+        if (baseUrl.isEmpty()) return ""
+        val encFolder = URLEncoder.encode(folder, "UTF-8")
+        val encName = URLEncoder.encode(filename, "UTF-8")
+        var url = "$baseUrl/download/$encFolder/$encName"
+        if (!folderKey.isNullOrBlank()) {
+            url += "?key=${URLEncoder.encode(folderKey, "UTF-8")}"
+        }
+        return url
     }
 
-    // --- Database ---
+    suspend fun deleteFile(folder: String, filename: String, folderKey: String?): Result<String> =
+        withContext(Dispatchers.IO) {
+            try {
+                val base = requireUrl()
+                val encFolder = URLEncoder.encode(folder, "UTF-8")
+                val encName = URLEncoder.encode(filename, "UTF-8")
+                val request = authBuilder("$base/download/$encFolder/$encName", folderKey).delete().build()
+                client.newCall(request).execute().use { response ->
+                    val text = response.body?.string() ?: ""
+                    if (response.isSuccessful) {
+                        val msg = try { JSONObject(text).optString("message", "Файл удалён") } catch (_: Exception) { text.ifBlank { "Файл удалён" } }
+                        Result.success(msg)
+                    } else Result.failure(parseError(response.code, text))
+                }
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+
     suspend fun dbGet(name: String, path: String = ""): Result<String> = withContext(Dispatchers.IO) {
-        if (baseUrl.isEmpty()) return@withContext Result.failure(Exception("URL не загружен"))
         try {
+            val base = requireUrl()
             val p = if (path.isBlank()) name else "$name/$path".trim('/')
-            val request = authRequest("$baseUrl/db/$p").get().build()
+            val request = authBuilder("$base/db/$p").get().build()
             client.newCall(request).execute().use { response ->
                 val text = response.body?.string() ?: ""
-                if (response.isSuccessful) Result.success(text)
-                else Result.failure(Exception("HTTP ${response.code}: $text"))
+                if (response.isSuccessful) Result.success(text) else Result.failure(parseError(response.code, text))
             }
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
 
-    suspend fun dbWrite(
-        name: String,
-        path: String,
-        value: String,
-        merge: Boolean = false,
-        force: Boolean = false
-    ): Result<String> = withContext(Dispatchers.IO) {
-        if (baseUrl.isEmpty()) return@withContext Result.failure(Exception("URL не загружен"))
-        try {
-            val p = if (path.isBlank()) name else "$name/$path".trim('/')
-            var url = "$baseUrl/db/$p"
-            val params = mutableListOf<String>()
-            if (merge) params.add("merge=1")
-            if (force) params.add("force=1")
-            if (params.isNotEmpty()) url += "?" + params.joinToString("&")
-
-            val body = value.toRequestBody("application/json; charset=utf-8".toMediaType())
-            val request = authRequest(url).post(body).build()
-            client.newCall(request).execute().use { response ->
-                val text = response.body?.string() ?: ""
-                if (response.isSuccessful) Result.success(text)
-                else Result.failure(Exception("HTTP ${response.code}: $text"))
+    suspend fun dbWrite(name: String, path: String, value: String, merge: Boolean = false, force: Boolean = false): Result<String> =
+        withContext(Dispatchers.IO) {
+            try {
+                val base = requireUrl()
+                val p = if (path.isBlank()) name else "$name/$path".trim('/')
+                var url = "$base/db/$p"
+                val params = mutableListOf<String>()
+                if (merge) params.add("merge=1")
+                if (force) params.add("force=1")
+                if (params.isNotEmpty()) url += "?" + params.joinToString("&")
+                val body = value.toRequestBody("application/json; charset=utf-8".toMediaType())
+                val request = authBuilder(url).post(body).build()
+                client.newCall(request).execute().use { response ->
+                    val text = response.body?.string() ?: ""
+                    if (response.isSuccessful) Result.success(text) else Result.failure(parseError(response.code, text))
+                }
+            } catch (e: Exception) {
+                Result.failure(e)
             }
-        } catch (e: Exception) {
-            Result.failure(e)
         }
-    }
 
     suspend fun dbDelete(name: String, path: String): Result<String> = withContext(Dispatchers.IO) {
-        if (baseUrl.isEmpty()) return@withContext Result.failure(Exception("URL не загружен"))
         try {
+            val base = requireUrl()
             val p = if (path.isBlank()) name else "$name/$path".trim('/')
-            val request = authRequest("$baseUrl/db/$p").delete().build()
+            val request = authBuilder("$base/db/$p").delete().build()
             client.newCall(request).execute().use { response ->
                 val text = response.body?.string() ?: ""
-                if (response.isSuccessful) Result.success(text)
-                else Result.failure(Exception("HTTP ${response.code}: $text"))
+                if (response.isSuccessful) Result.success(text) else Result.failure(parseError(response.code, text))
             }
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
 
-    // --- Scripts ---
     suspend fun loadScript(id: String, bytes: ByteArray): Result<String> = withContext(Dispatchers.IO) {
-        if (baseUrl.isEmpty()) return@withContext Result.failure(Exception("URL не загружен"))
         try {
+            val base = requireUrl()
             val body = bytes.toRequestBody("application/octet-stream".toMediaType())
-            val request = authRequest("$baseUrl/loadfile/$id").post(body).build()
+            val request = authBuilder("$base/loadfile/$id").post(body).build()
             client.newCall(request).execute().use { response ->
                 val text = response.body?.string() ?: ""
-                if (response.isSuccessful) Result.success(text)
-                else Result.failure(Exception("HTTP ${response.code}: $text"))
+                if (response.isSuccessful) Result.success(text) else Result.failure(parseError(response.code, text))
             }
         } catch (e: Exception) {
             Result.failure(e)
@@ -247,13 +361,12 @@ object ApiClient {
     }
 
     suspend fun stopScript(id: String): Result<String> = withContext(Dispatchers.IO) {
-        if (baseUrl.isEmpty()) return@withContext Result.failure(Exception("URL не загружен"))
         try {
-            val request = authRequest("$baseUrl/stopfile/$id").get().build()
+            val base = requireUrl()
+            val request = authBuilder("$base/stopfile/$id").get().build()
             client.newCall(request).execute().use { response ->
                 val text = response.body?.string() ?: ""
-                if (response.isSuccessful) Result.success(text)
-                else Result.failure(Exception("HTTP ${response.code}: $text"))
+                if (response.isSuccessful) Result.success(text) else Result.failure(parseError(response.code, text))
             }
         } catch (e: Exception) {
             Result.failure(e)
@@ -261,13 +374,12 @@ object ApiClient {
     }
 
     suspend fun scriptLogs(id: String): Result<String> = withContext(Dispatchers.IO) {
-        if (baseUrl.isEmpty()) return@withContext Result.failure(Exception("URL не загружен"))
         try {
-            val request = authRequest("$baseUrl/logs/$id").get().build()
+            val base = requireUrl()
+            val request = authBuilder("$base/logs/$id").get().build()
             client.newCall(request).execute().use { response ->
                 val text = response.body?.string() ?: ""
-                if (response.isSuccessful) Result.success(text)
-                else Result.failure(Exception("HTTP ${response.code}: $text"))
+                if (response.isSuccessful) Result.success(text) else Result.failure(parseError(response.code, text))
             }
         } catch (e: Exception) {
             Result.failure(e)
@@ -275,30 +387,19 @@ object ApiClient {
     }
 
     suspend fun updateServer(secret: String, bytes: ByteArray): Result<String> = withContext(Dispatchers.IO) {
-        if (baseUrl.isEmpty()) return@withContext Result.failure(Exception("URL не загружен"))
-        if (secret.isBlank()) return@withContext Result.failure(Exception("Укажите secret"))
-        if (bytes.isEmpty()) return@withContext Result.failure(Exception("Пустой файл"))
         try {
-            val url = "$baseUrl/update_server?secret=${java.net.URLEncoder.encode(secret, "UTF-8")}"
+            val base = requireUrl()
+            if (secret.isBlank()) return@withContext Result.failure(Exception("Укажите secret"))
+            if (bytes.isEmpty()) return@withContext Result.failure(Exception("Пустой файл"))
+            val url = "$base/update_server?secret=${URLEncoder.encode(secret, "UTF-8")}"
             val body = bytes.toRequestBody("text/x-python; charset=utf-8".toMediaType())
-            val request = authRequest(url).post(body).build()
+            val request = authBuilder(url).post(body).build()
             client.newCall(request).execute().use { response ->
                 val text = response.body?.string() ?: ""
                 if (response.isSuccessful) {
-                    val msg = try {
-                        JSONObject(text).optString("message", text)
-                    } catch (_: Exception) {
-                        text.ifBlank { "OK" }
-                    }
+                    val msg = try { JSONObject(text).optString("message", text) } catch (_: Exception) { text.ifBlank { "OK" } }
                     Result.success(msg)
-                } else {
-                    val msg = try {
-                        JSONObject(text).optString("message", text)
-                    } catch (_: Exception) {
-                        text
-                    }
-                    Result.failure(Exception("HTTP ${response.code}: $msg"))
-                }
+                } else Result.failure(parseError(response.code, text))
             }
         } catch (e: Exception) {
             Result.failure(e)

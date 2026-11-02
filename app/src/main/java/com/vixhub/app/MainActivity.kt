@@ -1,22 +1,22 @@
 package com.vixhub.app
 
+import android.app.DownloadManager
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -28,32 +28,21 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
 import com.vixhub.app.ui.theme.VixHubTheme
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import org.json.JSONObject
-import android.app.DownloadManager
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.os.Environment
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.combinedClickable
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -71,7 +60,7 @@ class MainActivity : ComponentActivity() {
 
 sealed class Tab(val title: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
     data object Status : Tab("Статус", Icons.Filled.MonitorHeart)
-    data object Photos : Tab("Фото", Icons.Filled.PhotoLibrary)
+    data object Storage : Tab("Файлы", Icons.Filled.Folder)
     data object Database : Tab("База", Icons.Filled.Storage)
     data object Scripts : Tab("Скрипты", Icons.Filled.Code)
     data object Server : Tab("Сервер", Icons.Filled.CloudUpload)
@@ -93,31 +82,31 @@ class AppViewModel : ViewModel() {
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
 
-    // Photos
-    private val _images = MutableStateFlow<List<ImageItem>>(emptyList())
-    val images: StateFlow<List<ImageItem>> = _images.asStateFlow()
+    // Storage
+    private val _groups = MutableStateFlow<List<ApiClient.GroupInfo>>(emptyList())
+    val groups: StateFlow<List<ApiClient.GroupInfo>> = _groups.asStateFlow()
 
-    // DB
+    private val _files = MutableStateFlow<List<ApiClient.FileInfo>>(emptyList())
+    val files: StateFlow<List<ApiClient.FileInfo>> = _files.asStateFlow()
+
+    private val _currentFolder = MutableStateFlow<String?>(null)
+    val currentFolder: StateFlow<String?> = _currentFolder.asStateFlow()
+
+    // folder name -> password (session)
+    private val folderKeys = mutableMapOf<String, String>()
+
     private val _dbResult = MutableStateFlow("")
     val dbResult: StateFlow<String> = _dbResult.asStateFlow()
 
-    // Scripts
     private val _scriptLogs = MutableStateFlow("")
     val scriptLogs: StateFlow<String> = _scriptLogs.asStateFlow()
-
-    data class ImageItem(val id: String, val filename: String)
 
     init {
         refreshUrlAndHealth()
     }
 
-    fun clearMessage() {
-        _message.value = null
-    }
-
-    fun showMessage(msg: String) {
-        _message.value = msg
-    }
+    fun clearMessage() { _message.value = null }
+    fun showMessage(msg: String) { _message.value = msg }
 
     fun refreshUrlAndHealth() {
         viewModelScope.launch {
@@ -150,52 +139,117 @@ class AppViewModel : ViewModel() {
         _loading.value = false
     }
 
-    fun loadImages() {
-        viewModelScope.launch {
-            _loading.value = true
-            ApiClient.listImages()
-                .onSuccess { pairs ->
-                    val list = pairs.map { (id, name) -> ImageItem(id, name) }
-                    _images.value = list
-                    showMessage("Загружено ${list.size} фото")
-                }
-                .onFailure {
-                    showMessage("Ошибка списка: ${it.message}")
-                }
-            _loading.value = false
-        }
-    }
+    // ── Storage ──
 
-    fun uploadPhoto(bytes: ByteArray, name: String) {
+    fun loadGroups() {
         viewModelScope.launch {
             _loading.value = true
-            ApiClient.uploadPhoto(bytes, name)
+            ApiClient.listGroups()
                 .onSuccess {
-                    showMessage("Загружено: ${it.optString("id", it.toString())}")
-                    loadImages()
+                    _groups.value = it
+                    showMessage("Папок: ${it.size}")
+                }
+                .onFailure { showMessage("Ошибка: ${it.message}") }
+            _loading.value = false
+        }
+    }
+
+    fun createGroup(name: String, password: String?) {
+        viewModelScope.launch {
+            _loading.value = true
+            ApiClient.createGroup(name, password)
+                .onSuccess {
+                    showMessage(it)
+                    if (!password.isNullOrBlank()) folderKeys[name] = password
+                    loadGroups()
+                }
+                .onFailure { showMessage("Ошибка: ${it.message}") }
+            _loading.value = false
+        }
+    }
+
+    fun deleteGroup(name: String) {
+        viewModelScope.launch {
+            _loading.value = true
+            ApiClient.deleteGroup(name)
+                .onSuccess {
+                    showMessage(it)
+                    folderKeys.remove(name)
+                    if (_currentFolder.value == name) {
+                        _currentFolder.value = null
+                        _files.value = emptyList()
+                    }
+                    loadGroups()
+                }
+                .onFailure { showMessage("Ошибка: ${it.message}") }
+            _loading.value = false
+        }
+    }
+
+    fun openFolder(name: String, password: String? = null) {
+        viewModelScope.launch {
+            _loading.value = true
+            val key = password?.takeIf { it.isNotBlank() } ?: folderKeys[name]
+            ApiClient.listFiles(name, key)
+                .onSuccess {
+                    if (!key.isNullOrBlank()) folderKeys[name] = key
+                    _currentFolder.value = name
+                    _files.value = it
+                    showMessage("Файлов: ${it.size}")
                 }
                 .onFailure {
-                    showMessage("Ошибка загрузки: ${it.message}")
+                    showMessage("Ошибка: ${it.message}")
+                    // если пароль неверный — не открываем
                 }
             _loading.value = false
         }
     }
 
-    fun deletePhoto(id: String) {
+    fun closeFolder() {
+        _currentFolder.value = null
+        _files.value = emptyList()
+    }
+
+    fun refreshFiles() {
+        val folder = _currentFolder.value ?: return
+        openFolder(folder, folderKeys[folder])
+    }
+
+    fun uploadToFolder(filename: String, bytes: ByteArray) {
+        val folder = _currentFolder.value ?: run {
+            showMessage("Папка не открыта")
+            return
+        }
         viewModelScope.launch {
             _loading.value = true
-            ApiClient.deleteImage(id)
-                .onSuccess { msg ->
-                    showMessage(msg.ifBlank { "Фото удалено" })
-                    _images.value = _images.value.filter { it.id != id }
-                    loadImages()
+            ApiClient.uploadFile(folder, filename, bytes, folderKeys[folder])
+                .onSuccess {
+                    showMessage(it)
+                    refreshFiles()
                 }
-                .onFailure {
-                    showMessage("Ошибка удаления: ${it.message}")
-                }
+                .onFailure { showMessage("Ошибка загрузки: ${it.message}") }
             _loading.value = false
         }
     }
+
+    fun deleteFile(filename: String) {
+        val folder = _currentFolder.value ?: return
+        viewModelScope.launch {
+            _loading.value = true
+            ApiClient.deleteFile(folder, filename, folderKeys[folder])
+                .onSuccess {
+                    showMessage(it)
+                    _files.value = _files.value.filter { f -> f.name != filename }
+                    refreshFiles()
+                }
+                .onFailure { showMessage("Ошибка: ${it.message}") }
+            _loading.value = false
+        }
+    }
+
+    fun folderKey(folder: String?): String? = folder?.let { folderKeys[it] }
+
+    // ── DB ──
 
     fun dbGet(name: String, path: String) {
         viewModelScope.launch {
@@ -231,9 +285,7 @@ class AppViewModel : ViewModel() {
                     _dbResult.value = "Удалено: $it"
                     showMessage("Удалено")
                 }
-                .onFailure {
-                    _dbResult.value = "Ошибка: ${it.message}"
-                }
+                .onFailure { _dbResult.value = "Ошибка: ${it.message}" }
             _loading.value = false
         }
     }
@@ -246,9 +298,7 @@ class AppViewModel : ViewModel() {
                     showMessage("Скрипт $id запущен")
                     _scriptLogs.value = it
                 }
-                .onFailure {
-                    showMessage("Ошибка: ${it.message}")
-                }
+                .onFailure { showMessage("Ошибка: ${it.message}") }
             _loading.value = false
         }
     }
@@ -279,13 +329,10 @@ class AppViewModel : ViewModel() {
             ApiClient.updateServer(secret, bytes)
                 .onSuccess { msg ->
                     showMessage(msg)
-                    // после рестарта URL может смениться — обновим через пару секунд
                     kotlinx.coroutines.delay(2500)
                     refreshUrlAndHealth()
                 }
-                .onFailure {
-                    showMessage("Ошибка обновления: ${it.message}")
-                }
+                .onFailure { showMessage("Ошибка обновления: ${it.message}") }
             _loading.value = false
         }
     }
@@ -293,7 +340,7 @@ class AppViewModel : ViewModel() {
     private fun prettyJson(raw: String): String {
         return try {
             when {
-                raw.trimStart().startsWith("{") -> JSONObject(raw).toString(2)
+                raw.trimStart().startsWith("{") -> org.json.JSONObject(raw).toString(2)
                 raw.trimStart().startsWith("[") -> org.json.JSONArray(raw).toString(2)
                 else -> raw
             }
@@ -307,7 +354,7 @@ class AppViewModel : ViewModel() {
 @Composable
 fun VixHubApp(vm: AppViewModel = viewModel()) {
     var selectedTab by remember { mutableIntStateOf(0) }
-    val tabs = listOf(Tab.Status, Tab.Photos, Tab.Database, Tab.Scripts, Tab.Server)
+    val tabs = listOf(Tab.Status, Tab.Storage, Tab.Database, Tab.Scripts, Tab.Server)
     val loading by vm.loading.collectAsState()
     val message by vm.message.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -354,11 +401,7 @@ fun VixHubApp(vm: AppViewModel = viewModel()) {
                         onClick = { selectedTab = index },
                         icon = { Icon(tab.icon, contentDescription = tab.title) },
                         label = {
-                            Text(
-                                tab.title,
-                                maxLines = 1,
-                                style = MaterialTheme.typography.labelSmall
-                            )
+                            Text(tab.title, maxLines = 1, style = MaterialTheme.typography.labelSmall)
                         },
                         colors = NavigationBarItemDefaults.colors(
                             selectedIconColor = MaterialTheme.colorScheme.primary,
@@ -381,7 +424,7 @@ fun VixHubApp(vm: AppViewModel = viewModel()) {
         Box(Modifier.padding(padding).fillMaxSize()) {
             when (selectedTab) {
                 0 -> StatusScreen(vm)
-                1 -> PhotosScreen(vm)
+                1 -> StorageScreen(vm)
                 2 -> DatabaseScreen(vm)
                 3 -> ScriptsScreen(vm)
                 4 -> ServerUpdateScreen(vm)
@@ -439,20 +482,11 @@ fun StatusScreen(vm: AppViewModel) {
             }
         }
 
-        OutlinedButton(
-            onClick = { vm.refreshUrlAndHealth() },
-            modifier = Modifier.fillMaxWidth()
-        ) {
+        OutlinedButton(onClick = { vm.refreshUrlAndHealth() }, modifier = Modifier.fillMaxWidth()) {
             Icon(Icons.Default.Refresh, null)
             Spacer(Modifier.width(8.dp))
             Text("Обновить URL и статус")
         }
-
-        Text(
-            "Токен авторизации встроен. Все запросы (кроме фото и health) используют Bearer.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
     }
 }
 
@@ -478,131 +512,162 @@ fun StatusCard(title: String, value: String, icon: androidx.compose.ui.graphics.
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun PhotosScreen(vm: AppViewModel) {
-    val images by vm.images.collectAsState()
+fun StorageScreen(vm: AppViewModel) {
+    val groups by vm.groups.collectAsState()
+    val files by vm.files.collectAsState()
+    val currentFolder by vm.currentFolder.collectAsState()
     val context = LocalContext.current
-    var previewId by remember { mutableStateOf<String?>(null) }
-    var menuItem by remember { mutableStateOf<AppViewModel.ImageItem?>(null) }
 
-    val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+    var showCreate by remember { mutableStateOf(false) }
+    var createName by remember { mutableStateOf("") }
+    var createPass by remember { mutableStateOf("") }
+
+    var passwordPromptFolder by remember { mutableStateOf<String?>(null) }
+    var passwordInput by remember { mutableStateOf("") }
+
+    var deleteGroupName by remember { mutableStateOf<String?>(null) }
+    var fileMenu by remember { mutableStateOf<ApiClient.FileInfo?>(null) }
+
+    val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         uri ?: return@rememberLauncherForActivityResult
         try {
             context.contentResolver.openInputStream(uri)?.use { stream ->
                 val bytes = stream.readBytes()
-                val name = uri.lastPathSegment?.substringAfterLast('/') ?: "photo_${System.currentTimeMillis()}.jpg"
-                vm.uploadPhoto(bytes, name)
+                val name = uri.lastPathSegment?.substringAfterLast('/')
+                    ?: "file_${System.currentTimeMillis()}"
+                vm.uploadToFolder(name, bytes)
             }
         } catch (e: Exception) {
-            vm.showMessage("Ошибка чтения файла: ${e.message}")
+            vm.showMessage("Ошибка файла: ${e.message}")
         }
     }
 
-    fun copyLink(item: AppViewModel.ImageItem) {
-        val url = ApiClient.imageUrl(item.id)
-        val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
-        cm.setPrimaryClip(ClipData.newPlainText("photo_url", url))
-        vm.showMessage("Ссылка скопирована")
-    }
-
-    fun downloadPhoto(item: AppViewModel.ImageItem) {
-        val url = ApiClient.imageUrl(item.id)
-        if (url.isBlank()) {
-            vm.showMessage("URL пустой")
-            return
-        }
-        try {
-            val dm = context.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as DownloadManager
-            val request = DownloadManager.Request(Uri.parse(url))
-                .setTitle(item.filename)
-                .setDescription("Загрузка фото из VixHub")
-                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, item.filename)
-                .setAllowedOverMetered(true)
-                .setAllowedOverRoaming(true)
-            dm.enqueue(request)
-            vm.showMessage("Скачивание начато")
-        } catch (e: Exception) {
-            vm.showMessage("Ошибка скачивания: ${e.message}")
-        }
+    LaunchedEffect(Unit) {
+        if (groups.isEmpty()) vm.loadGroups()
     }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Button(
-                onClick = { pickImage.launch("image/*") },
-                modifier = Modifier.weight(1f)
-            ) {
-                Icon(Icons.Default.Upload, null)
-                Spacer(Modifier.width(8.dp))
-                Text("Загрузить")
+        if (currentFolder == null) {
+            // ── Список папок ──
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { showCreate = true }, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Default.CreateNewFolder, null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Создать")
+                }
+                OutlinedButton(onClick = { vm.loadGroups() }, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Default.Refresh, null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Обновить")
+                }
             }
-            OutlinedButton(
-                onClick = { vm.loadImages() },
-                modifier = Modifier.weight(1f)
-            ) {
-                Icon(Icons.Default.Refresh, null)
-                Spacer(Modifier.width(8.dp))
-                Text("Список")
-            }
-        }
+            Spacer(Modifier.height(12.dp))
 
-        Spacer(Modifier.height(12.dp))
-
-        if (images.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.Outlined.PhotoLibrary, null, modifier = Modifier.size(64.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(Modifier.height(8.dp))
-                    Text("Нет фото. Нажмите «Список» или загрузите.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("Долгое нажатие — меню действий", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (groups.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Outlined.FolderOff, null, modifier = Modifier.size(64.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.height(8.dp))
+                        Text("Нет папок", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            } else {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(groups, key = { it.name }) { g ->
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .combinedClickable(
+                                    onClick = {
+                                        if (g.protected && vm.folderKey(g.name) == null) {
+                                            passwordPromptFolder = g.name
+                                            passwordInput = ""
+                                        } else {
+                                            vm.openFolder(g.name)
+                                        }
+                                    },
+                                    onLongClick = { deleteGroupName = g.name }
+                                ),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Row(
+                                Modifier.padding(16.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    if (g.protected) Icons.Default.Lock else Icons.Default.Folder,
+                                    null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(32.dp)
+                                )
+                                Spacer(Modifier.width(12.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(g.name, fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        if (g.protected) "Защищена паролем" else "Открытая",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
                 }
             }
         } else {
-            LazyVerticalGrid(
-                columns = GridCells.Adaptive(120.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxSize()
+            // ── Содержимое папки ──
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = { vm.closeFolder() }) {
+                    Icon(Icons.Default.ArrowBack, "Назад")
+                }
+                Column(Modifier.weight(1f)) {
+                    Text(currentFolder!!, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("${files.size} файл(ов)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                IconButton(onClick = { vm.refreshFiles() }) {
+                    Icon(Icons.Default.Refresh, null)
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Button(
+                onClick = { pickFile.launch("*/*") },
+                modifier = Modifier.fillMaxWidth()
             ) {
-                items(images, key = { it.id }) { item ->
-                    Box {
+                Icon(Icons.Default.Upload, null)
+                Spacer(Modifier.width(8.dp))
+                Text("Загрузить файл (до 200 МБ)")
+            }
+            Spacer(Modifier.height(12.dp))
+
+            if (files.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("Папка пуста", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(files, key = { it.name }) { f ->
                         Card(
                             modifier = Modifier
-                                .aspectRatio(1f)
+                                .fillMaxWidth()
                                 .combinedClickable(
-                                    onClick = { previewId = item.id },
-                                    onLongClick = { menuItem = item }
+                                    onClick = { fileMenu = f },
+                                    onLongClick = { fileMenu = f }
                                 ),
-                            shape = RoundedCornerShape(12.dp)
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                            shape = RoundedCornerShape(10.dp)
                         ) {
-                            Box {
-                                AsyncImage(
-                                    model = ImageRequest.Builder(context)
-                                        .data(ApiClient.imageUrl(item.id))
-                                        .crossfade(true)
-                                        .build(),
-                                    contentDescription = item.filename,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                                Box(
-                                    Modifier
-                                        .align(Alignment.BottomStart)
-                                        .fillMaxWidth()
-                                        .background(Color.Black.copy(alpha = 0.55f))
-                                        .padding(6.dp)
-                                ) {
-                                    Text(
-                                        item.filename,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = Color.White,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
+                            Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.InsertDriveFile, null, tint = MaterialTheme.colorScheme.primary)
+                                Spacer(Modifier.width(12.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(f.name, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    f.size?.let {
+                                        Text(formatSize(it), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
                                 }
+                                Icon(Icons.Default.MoreVert, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
                     }
@@ -611,82 +676,173 @@ fun PhotosScreen(vm: AppViewModel) {
         }
     }
 
-    // Меню по долгому нажатию
-    if (menuItem != null) {
-        val item = menuItem!!
+    // Create folder dialog
+    if (showCreate) {
         AlertDialog(
-            onDismissRequest = { menuItem = null },
-            title = {
-                Text(
-                    item.filename,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
+            onDismissRequest = { showCreate = false },
+            title = { Text("Новая папка") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = createName,
+                        onValueChange = { createName = it.filter { c -> c.isLetterOrDigit() || c == '_' || c == '-' } },
+                        label = { Text("Имя (a-z, 0-9, _, -)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = createPass,
+                        onValueChange = { createPass = it },
+                        label = { Text("Пароль (необязательно)") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (createName.isBlank()) {
+                        vm.showMessage("Укажите имя")
+                    } else {
+                        showCreate = false
+                        vm.createGroup(createName, createPass.ifBlank { null })
+                        createName = ""
+                        createPass = ""
+                    }
+                }) { Text("Создать") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCreate = false }) { Text("Отмена") }
+            }
+        )
+    }
+
+    // Password prompt
+    if (passwordPromptFolder != null) {
+        AlertDialog(
+            onDismissRequest = { passwordPromptFolder = null },
+            title = { Text("Пароль: ${passwordPromptFolder}") },
+            text = {
+                OutlinedTextField(
+                    value = passwordInput,
+                    onValueChange = { passwordInput = it },
+                    label = { Text("X-Folder-Key") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth()
                 )
             },
+            confirmButton = {
+                TextButton(onClick = {
+                    val name = passwordPromptFolder!!
+                    passwordPromptFolder = null
+                    vm.openFolder(name, passwordInput)
+                }) { Text("Открыть") }
+            },
+            dismissButton = {
+                TextButton(onClick = { passwordPromptFolder = null }) { Text("Отмена") }
+            }
+        )
+    }
+
+    // Delete group
+    if (deleteGroupName != null) {
+        AlertDialog(
+            onDismissRequest = { deleteGroupName = null },
+            title = { Text("Удалить папку?") },
+            text = { Text("«${deleteGroupName}» и всё содержимое будут удалены безвозвратно.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val n = deleteGroupName!!
+                        deleteGroupName = null
+                        vm.deleteGroup(n)
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) { Text("Удалить") }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteGroupName = null }) { Text("Отмена") }
+            }
+        )
+    }
+
+    // File menu
+    if (fileMenu != null) {
+        val f = fileMenu!!
+        val folder = currentFolder!!
+        AlertDialog(
+            onDismissRequest = { fileMenu = null },
+            title = { Text(f.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     TextButton(
                         onClick = {
-                            downloadPhoto(item)
-                            menuItem = null
+                            val url = ApiClient.downloadUrl(folder, f.name, vm.folderKey(folder))
+                            try {
+                                val dm = context.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as DownloadManager
+                                val req = DownloadManager.Request(Uri.parse(url))
+                                    .setTitle(f.name)
+                                    .setDescription("VixHub")
+                                    .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                                    .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, f.name)
+                                    .addRequestHeader("Authorization", "Bearer xQ9_mL2pR5tY_7vB3nM8kL1jH4gF6dS2a")
+                                dm.enqueue(req)
+                                vm.showMessage("Скачивание начато")
+                            } catch (e: Exception) {
+                                vm.showMessage("Ошибка: ${e.message}")
+                            }
+                            fileMenu = null
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Icon(Icons.Default.Download, null)
                         Spacer(Modifier.width(12.dp))
-                        Text("Скачать", modifier = Modifier.weight(1f))
+                        Text("Скачать", Modifier.weight(1f))
                     }
                     TextButton(
                         onClick = {
-                            copyLink(item)
-                            menuItem = null
+                            val url = ApiClient.downloadUrl(folder, f.name, vm.folderKey(folder))
+                            val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            cm.setPrimaryClip(ClipData.newPlainText("url", url))
+                            vm.showMessage("Ссылка скопирована")
+                            fileMenu = null
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Icon(Icons.Default.Link, null)
                         Spacer(Modifier.width(12.dp))
-                        Text("Скопировать ссылку", modifier = Modifier.weight(1f))
+                        Text("Скопировать ссылку", Modifier.weight(1f))
                     }
                     TextButton(
                         onClick = {
-                            vm.deletePhoto(item.id)
-                            menuItem = null
+                            fileMenu = null
+                            vm.deleteFile(f.name)
                         },
                         modifier = Modifier.fillMaxWidth(),
                         colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
                     ) {
                         Icon(Icons.Default.Delete, null)
                         Spacer(Modifier.width(12.dp))
-                        Text("Удалить", modifier = Modifier.weight(1f))
+                        Text("Удалить", Modifier.weight(1f))
                     }
                 }
             },
             confirmButton = {
-                TextButton(onClick = { menuItem = null }) { Text("Отмена") }
+                TextButton(onClick = { fileMenu = null }) { Text("Закрыть") }
             }
         )
     }
+}
 
-    // Превью по обычному тапу
-    if (previewId != null) {
-        AlertDialog(
-            onDismissRequest = { previewId = null },
-            title = { Text("Фото") },
-            text = {
-                AsyncImage(
-                    model = ApiClient.imageUrl(previewId!!),
-                    contentDescription = null,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 400.dp),
-                    contentScale = ContentScale.Fit
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = { previewId = null }) { Text("Закрыть") }
-            }
-        )
-    }
+private fun formatSize(bytes: Long): String {
+    if (bytes < 1024) return "$bytes B"
+    val kb = bytes / 1024.0
+    if (kb < 1024) return "%.1f KB".format(kb)
+    val mb = kb / 1024.0
+    if (mb < 1024) return "%.1f MB".format(mb)
+    return "%.2f GB".format(mb / 1024.0)
 }
 
 @Composable
@@ -705,31 +861,9 @@ fun DatabaseScreen(vm: AppViewModel) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        OutlinedTextField(
-            value = dbName,
-            onValueChange = { dbName = it },
-            label = { Text("Имя базы") },
-            placeholder = { Text("base / users / ...") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
-        )
-        OutlinedTextField(
-            value = path,
-            onValueChange = { path = it },
-            label = { Text("Путь (опционально)") },
-            placeholder = { Text("admin/name") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
-        )
-        OutlinedTextField(
-            value = value,
-            onValueChange = { value = it },
-            label = { Text("Значение (JSON / строка / число)") },
-            placeholder = { Text("\"Ivan\" или {\"a\":1}") },
-            minLines = 3,
-            modifier = Modifier.fillMaxWidth()
-        )
-
+        OutlinedTextField(value = dbName, onValueChange = { dbName = it }, label = { Text("Имя базы") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(value = path, onValueChange = { path = it }, label = { Text("Путь") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(value = value, onValueChange = { value = it }, label = { Text("Значение") }, minLines = 3, modifier = Modifier.fillMaxWidth())
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(checked = merge, onCheckedChange = { merge = it })
             Text("Merge")
@@ -737,7 +871,6 @@ fun DatabaseScreen(vm: AppViewModel) {
             Checkbox(checked = force, onCheckedChange = { force = it })
             Text("Force")
         }
-
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             Button(onClick = { vm.dbGet(dbName, path) }, modifier = Modifier.weight(1f)) {
                 Icon(Icons.Default.Download, null, modifier = Modifier.size(18.dp))
@@ -759,20 +892,12 @@ fun DatabaseScreen(vm: AppViewModel) {
             Spacer(Modifier.width(8.dp))
             Text("Удалить")
         }
-
         if (result.isNotEmpty()) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
             ) {
-                Text(
-                    result,
-                    modifier = Modifier
-                        .padding(12.dp)
-                        .fillMaxWidth(),
-                    fontFamily = FontFamily.Monospace,
-                    style = MaterialTheme.typography.bodySmall
-                )
+                Text(result, Modifier.padding(12.dp).fillMaxWidth(), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
             }
         }
     }
@@ -792,34 +917,23 @@ fun ScriptsScreen(vm: AppViewModel) {
         }
         try {
             context.contentResolver.openInputStream(uri)?.use { stream ->
-                val bytes = stream.readBytes()
-                vm.loadScript(scriptId.trim(), bytes)
+                vm.loadScript(scriptId.trim(), stream.readBytes())
             }
         } catch (e: Exception) {
             vm.showMessage("Ошибка файла: ${e.message}")
         }
     }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
+    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         OutlinedTextField(
             value = scriptId,
             onValueChange = { scriptId = it },
             label = { Text("ID скрипта") },
-            placeholder = { Text("main / bot / ...") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
-
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            Button(
-                onClick = { pickScript.launch("*/*") },
-                modifier = Modifier.weight(1f)
-            ) {
+            Button(onClick = { pickScript.launch("*/*") }, modifier = Modifier.weight(1f)) {
                 Icon(Icons.Default.UploadFile, null)
                 Spacer(Modifier.width(4.dp))
                 Text("Загрузить .py")
@@ -833,32 +947,24 @@ fun ScriptsScreen(vm: AppViewModel) {
                 Text("Стоп")
             }
         }
-
         Button(
             onClick = { if (scriptId.isNotBlank()) vm.fetchLogs(scriptId.trim()) },
             modifier = Modifier.fillMaxWidth()
         ) {
             Icon(Icons.Default.Article, null)
             Spacer(Modifier.width(8.dp))
-            Text("Получить логи (50 строк)")
+            Text("Получить логи")
         }
-
         Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
+            modifier = Modifier.fillMaxWidth().weight(1f),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
         ) {
             Column(Modifier.padding(12.dp).fillMaxSize()) {
-                Text("Логи", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                Text("Логи", fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(8.dp))
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .verticalScroll(rememberScrollState())
-                ) {
+                Box(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
                     Text(
-                        text = logs.ifEmpty { "Логи появятся здесь..." },
+                        logs.ifEmpty { "Логи появятся здесь..." },
                         fontFamily = FontFamily.Monospace,
                         style = MaterialTheme.typography.bodySmall,
                         color = if (logs.isEmpty()) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
@@ -868,7 +974,6 @@ fun ScriptsScreen(vm: AppViewModel) {
         }
     }
 }
-
 
 @Composable
 fun ServerUpdateScreen(vm: AppViewModel) {
@@ -897,28 +1002,20 @@ fun ServerUpdateScreen(vm: AppViewModel) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        Text("Обновление server.py", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         Text(
-            "Обновление server.py",
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold
-        )
-        Text(
-            "Загружает новый код на сервер. Перед записью сервер проверяет синтаксис (compile). " +
-                "При успехе создаётся server.py.bak и через ~1.5 сек процесс перезапускается.",
+            "POST /update_server?secret=… + Bearer. Сервер проверяет compile(), делает .bak и перезапускается через ~1.5 с.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-
         OutlinedTextField(
             value = secret,
             onValueChange = { secret = it },
             label = { Text("Secret-код") },
-            placeholder = { Text("секрет из URL ?secret=") },
             singleLine = true,
-            visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+            visualTransformation = PasswordVisualTransformation(),
             modifier = Modifier.fillMaxWidth()
         )
-
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
@@ -927,26 +1024,20 @@ fun ServerUpdateScreen(vm: AppViewModel) {
                 Text("Файл server.py", fontWeight = FontWeight.SemiBold)
                 Text(
                     selectedName?.let { "$it (${selectedBytes?.size ?: 0} байт)" } ?: "Файл не выбран",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (selectedName == null) MaterialTheme.colorScheme.onSurfaceVariant
-                    else MaterialTheme.colorScheme.primary
+                    color = if (selectedName == null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary
                 )
-                OutlinedButton(
-                    onClick = { pickPy.launch("*/*") },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+                OutlinedButton(onClick = { pickPy.launch("*/*") }, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Default.AttachFile, null)
                     Spacer(Modifier.width(8.dp))
                     Text("Выбрать .py")
                 }
             }
         }
-
         Button(
             onClick = {
                 when {
                     secret.isBlank() -> vm.showMessage("Укажите secret")
-                    selectedBytes == null || selectedBytes!!.isEmpty() -> vm.showMessage("Выберите файл")
+                    selectedBytes == null -> vm.showMessage("Выберите файл")
                     else -> confirmOpen = true
                 }
             },
@@ -957,43 +1048,18 @@ fun ServerUpdateScreen(vm: AppViewModel) {
             Spacer(Modifier.width(8.dp))
             Text("Отправить и перезапустить")
         }
-
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
-        ) {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("Как это работает", fontWeight = FontWeight.SemiBold)
-                Text("1. POST /update_server?secret=… + Bearer + тело файла", style = MaterialTheme.typography.bodySmall)
-                Text("2. Сервер проверяет secret и compile()", style = MaterialTheme.typography.bodySmall)
-                Text("3. Бэкап → запись → ответ 200", style = MaterialTheme.typography.bodySmall)
-                Text("4. Через 1.5 сек os.execv — процесс перезапускается", style = MaterialTheme.typography.bodySmall)
-                Text(
-                    "После рестарта URL туннеля может измениться — приложение само обновит его из Firebase.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            }
-        }
     }
 
     if (confirmOpen) {
         AlertDialog(
             onDismissRequest = { confirmOpen = false },
             title = { Text("Подтвердите обновление") },
-            text = {
-                Text(
-                    "Сервер будет перезапущен с файлом «${selectedName}». " +
-                        "При синтаксической ошибке обновление отклонят. Продолжить?"
-                )
-            },
+            text = { Text("Сервер перезапустится с «${selectedName}». Продолжить?") },
             confirmButton = {
-                TextButton(
-                    onClick = {
-                        confirmOpen = false
-                        vm.updateServer(secret.trim(), selectedBytes!!, selectedName ?: "server.py")
-                    }
-                ) { Text("Обновить") }
+                TextButton(onClick = {
+                    confirmOpen = false
+                    vm.updateServer(secret.trim(), selectedBytes!!, selectedName ?: "server.py")
+                }) { Text("Обновить") }
             },
             dismissButton = {
                 TextButton(onClick = { confirmOpen = false }) { Text("Отмена") }
