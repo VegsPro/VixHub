@@ -1,4 +1,4 @@
-package com.vixhub.app
+package com.vixhub.client
 // BuildConfig generated
 
 import android.app.DownloadManager
@@ -41,7 +41,7 @@ import androidx.lifecycle.AndroidViewModel
 import android.app.Application
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.vixhub.app.ui.theme.VixHubTheme
+import com.vixhub.client.ui.theme.VixHubTheme
 import android.os.Build
 import android.Manifest
 import androidx.core.content.ContextCompat

@@ -1,4 +1,4 @@
-package com.vixhub.app
+package com.vixhub.client
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow

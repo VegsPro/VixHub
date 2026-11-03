@@ -1,4 +1,4 @@
-package com.vixhub.app
+package com.vixhub.client
 
 enum class FileKind {
     IMAGE, VIDEO, AUDIO, TEXT, CODE, ARCHIVE, OTHER

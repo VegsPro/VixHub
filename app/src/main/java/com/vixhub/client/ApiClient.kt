@@ -1,4 +1,4 @@
-package com.vixhub.app
+package com.vixhub.client
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext

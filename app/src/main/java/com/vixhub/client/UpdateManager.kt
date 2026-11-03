@@ -1,4 +1,4 @@
-package com.vixhub.app
+package com.vixhub.client
 
 import android.app.DownloadManager
 import android.app.NotificationChannel

@@ -14,15 +14,15 @@ if (keystorePropertiesFile.exists()) {
 }
 
 android {
-    namespace = "com.vixhub.app"
+    namespace = "com.vixhub.client"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.vixhub.app"
+        applicationId = "com.vixhub.client"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "1.3.1"
+        versionCode = 12
+        versionName = "1.4.0"
     }
 
     signingConfigs {
