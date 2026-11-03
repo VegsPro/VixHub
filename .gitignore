@@ -1,10 +1,6 @@
-*.keystore
-keystore.properties
 local.properties
 .gradle/
 build/
 app/build/
 *.iml
 .idea/
-release.keystore
-keystore.properties
