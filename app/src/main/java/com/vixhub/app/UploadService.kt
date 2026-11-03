@@ -39,11 +39,15 @@ class UploadService : Service() {
         }
 
         createChannel()
-        startForeground(NOTIF_ID, buildNotification(0, uris.size, "Подготовка…", 0, uris.size))
+        val nm = getSystemService(NotificationManager::class.java)
+        // cancel previous done notifs
+        nm.cancel(NOTIF_DONE_ID)
+
+        startForeground(NOTIF_ID, buildProgress(0, uris.size, "Подготовка…", 0, uris.size))
+        UploadProgress.start(folder, uris.size)
 
         job?.cancel()
         job = scope.launch {
-            // URL мог протухнуть / не загружен в этом процессе
             if (ApiClient.getBaseUrl().isEmpty()) {
                 ApiClient.fetchBaseUrl()
             }
@@ -57,30 +61,37 @@ class UploadService : Service() {
                 try {
                     val uri = Uri.parse(uriStr)
                     val name = FileUtils.displayName(this@UploadService, uri)
-                    updateNotification(current, total, "Загрузка: $name", current - 1, total)
+                    updateProgress(current, total, "Загрузка: $name", current - 1, total)
+                    UploadProgress.update(current, total, name, ok, fail)
 
                     val bytes = FileUtils.readBytes(this@UploadService, uri)
                     val result = ApiClient.uploadFile(folder, name, bytes, key)
                     if (result.isSuccess) {
                         ok++
-                        updateNotification(current, total, "Готово: $name", current, total)
+                        UploadProgress.update(current, total, "OK: $name", ok, fail)
                     } else {
                         fail++
-                        updateNotification(current, total, "Ошибка: $name", current, total)
+                        UploadProgress.update(current, total, "ERR: $name", ok, fail)
                     }
                 } catch (e: Exception) {
                     fail++
-                    updateNotification(current, total, "Ошибка: ${e.message}", current, total)
+                    UploadProgress.update(current, total, "ERR: ${e.message}", ok, fail)
                 }
             }
 
             val summary = when {
                 fail == 0 -> "Загружено $ok из $total"
-                ok == 0 -> "Не удалось загрузить ($fail ошибок)"
-                else -> "Загружено $ok из $total, ошибок: $fail"
+                ok == 0 -> "Ошибки: $fail из $total"
+                else -> "Готово: $ok ок, $fail ошибок из $total"
             }
-            showDoneNotification(summary, total)
-            stopForeground(STOP_FOREGROUND_DETACH)
+            UploadProgress.finish(ok, fail, total)
+
+            // remove ongoing foreground notif completely
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            nm.cancel(NOTIF_ID)
+
+            // short auto-cancel done notification
+            showDone(summary)
             stopSelf()
         }
 
@@ -94,22 +105,24 @@ class UploadService : Service() {
 
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val ch = NotificationChannel(
-                CHANNEL_ID,
-                "Загрузка файлов",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Прогресс массовой загрузки в VixHub"
-            }
             val nm = getSystemService(NotificationManager::class.java)
-            nm.createNotificationChannel(ch)
+            nm.createNotificationChannel(
+                NotificationChannel(CHANNEL_ID, "Загрузка файлов", NotificationManager.IMPORTANCE_LOW).apply {
+                    description = "Прогресс загрузки VixHub"
+                    setShowBadge(false)
+                }
+            )
+            nm.createNotificationChannel(
+                NotificationChannel(CHANNEL_DONE, "Загрузка завершена", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                    description = "Результат загрузки"
+                }
+            )
         }
     }
 
-    private fun buildNotification(current: Int, total: Int, text: String, progress: Int, max: Int): Notification {
+    private fun buildProgress(current: Int, total: Int, text: String, progress: Int, max: Int): Notification {
         val open = PendingIntent.getActivity(
-            this, 0,
-            Intent(this, MainActivity::class.java),
+            this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
@@ -118,38 +131,37 @@ class UploadService : Service() {
             .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setProgress(max, progress, max == 0)
+            .setProgress(max.coerceAtLeast(1), progress, false)
             .setContentIntent(open)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
             .build()
     }
 
-    private fun updateNotification(current: Int, total: Int, text: String, progress: Int, max: Int) {
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.notify(NOTIF_ID, buildNotification(current, total, text, progress, max))
+    private fun updateProgress(current: Int, total: Int, text: String, progress: Int, max: Int) {
+        getSystemService(NotificationManager::class.java)
+            .notify(NOTIF_ID, buildProgress(current, total, text, progress, max))
     }
 
-    private fun showDoneNotification(text: String, total: Int) {
+    private fun showDone(text: String) {
         val open = PendingIntent.getActivity(
-            this, 0,
-            Intent(this, MainActivity::class.java),
+            this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val n = NotificationCompat.Builder(this, CHANNEL_ID)
+        val n = NotificationCompat.Builder(this, CHANNEL_DONE)
             .setContentTitle("VixHub · загрузка завершена")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_sys_upload_done)
             .setOngoing(false)
             .setAutoCancel(true)
+            .setTimeoutAfter(8000)
             .setContentIntent(open)
-            .setProgress(0, 0, false)
             .build()
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.notify(NOTIF_DONE_ID, n)
+        getSystemService(NotificationManager::class.java).notify(NOTIF_DONE_ID, n)
     }
 
     companion object {
         const val CHANNEL_ID = "vixhub_upload"
+        const val CHANNEL_DONE = "vixhub_upload_done"
         const val NOTIF_ID = 4201
         const val NOTIF_DONE_ID = 4202
         const val EXTRA_FOLDER = "folder"

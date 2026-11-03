@@ -1,4 +1,5 @@
 package com.vixhub.app
+// BuildConfig generated
 
 import android.app.DownloadManager
 import android.content.ClipData
@@ -36,6 +37,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
+import android.app.Application
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.vixhub.app.ui.theme.VixHubTheme
@@ -82,7 +85,8 @@ sealed class Tab(val title: String, val icon: androidx.compose.ui.graphics.vecto
     data object Server : Tab("Сервер", Icons.Filled.CloudUpload)
 }
 
-class AppViewModel : ViewModel() {
+class AppViewModel(app: Application) : AndroidViewModel(app) {
+    private val prefs = AppPrefs(app)
     private val _baseUrl = MutableStateFlow("")
     val baseUrl: StateFlow<String> = _baseUrl.asStateFlow()
 
@@ -109,7 +113,7 @@ class AppViewModel : ViewModel() {
     val currentFolder: StateFlow<String?> = _currentFolder.asStateFlow()
 
     // folder name -> password (session)
-    private val folderKeys = mutableMapOf<String, String>()
+    // passwords via AppPrefs
 
     private val _dbResult = MutableStateFlow("")
     val dbResult: StateFlow<String> = _dbResult.asStateFlow()
@@ -176,7 +180,7 @@ class AppViewModel : ViewModel() {
             ApiClient.createGroup(name, password)
                 .onSuccess {
                     showMessage(it)
-                    if (!password.isNullOrBlank()) folderKeys[name] = password
+                    if (!password.isNullOrBlank()) prefs.setFolderKey(name, password)
                     loadGroups()
                 }
                 .onFailure { showMessage("Ошибка: ${it.message}") }
@@ -190,7 +194,7 @@ class AppViewModel : ViewModel() {
             ApiClient.deleteGroup(name)
                 .onSuccess {
                     showMessage(it)
-                    folderKeys.remove(name)
+                    prefs.forgetFolderKey(name)
                     if (_currentFolder.value == name) {
                         _currentFolder.value = null
                         _files.value = emptyList()
@@ -205,10 +209,10 @@ class AppViewModel : ViewModel() {
     fun openFolder(name: String, password: String? = null) {
         viewModelScope.launch {
             _loading.value = true
-            val key = password?.takeIf { it.isNotBlank() } ?: folderKeys[name]
+            val key = password?.takeIf { it.isNotBlank() } ?: prefs.getFolderKey(name)
             ApiClient.listFiles(name, key)
                 .onSuccess {
-                    if (!key.isNullOrBlank()) folderKeys[name] = key
+                    if (!key.isNullOrBlank()) prefs.setFolderKey(name, key)
                     _currentFolder.value = name
                     _files.value = it
                     showMessage("Файлов: ${it.size}")
@@ -228,7 +232,7 @@ class AppViewModel : ViewModel() {
 
     fun refreshFiles() {
         val folder = _currentFolder.value ?: return
-        openFolder(folder, folderKeys[folder])
+        openFolder(folder, folderKey(folder))
     }
 
     fun uploadToFolder(filename: String, bytes: ByteArray) {
@@ -238,7 +242,7 @@ class AppViewModel : ViewModel() {
         }
         viewModelScope.launch {
             _loading.value = true
-            ApiClient.uploadFile(folder, filename, bytes, folderKeys[folder])
+            ApiClient.uploadFile(folder, filename, bytes, folderKey(folder))
                 .onSuccess {
                     showMessage(it)
                     refreshFiles()
@@ -252,7 +256,7 @@ class AppViewModel : ViewModel() {
         val folder = _currentFolder.value ?: return
         viewModelScope.launch {
             _loading.value = true
-            ApiClient.deleteFile(folder, filename, folderKeys[folder])
+            ApiClient.deleteFile(folder, filename, folderKey(folder))
                 .onSuccess {
                     showMessage(it)
                     _files.value = _files.value.filter { f -> f.name != filename }
@@ -263,7 +267,16 @@ class AppViewModel : ViewModel() {
         }
     }
 
-    fun folderKey(folder: String?): String? = folder?.let { folderKeys[it] }
+    fun folderKey(folder: String?): String? = folder?.let { prefs.getFolderKey(it) }
+
+    fun forgetPassword(folder: String) {
+        prefs.forgetFolderKey(folder)
+        showMessage("Пароль для «$folder» забыт")
+    }
+
+    fun getViewMode(folder: String) = prefs.getViewMode(folder)
+    fun setViewMode(folder: String, mode: String) = prefs.setViewMode(folder, mode)
+
 
     // ── DB ──
 
@@ -382,6 +395,28 @@ fun VixHubApp(vm: AppViewModel = viewModel()) {
         }
     }
 
+    var updateInfo by remember { mutableStateOf<RemoteRelease?>(null) }
+    var updateDownloading by remember { mutableStateOf(false) }
+    var updateProgress by remember { mutableStateOf(0f) }
+    var showInstallCached by remember { mutableStateOf<java.io.File?>(null) }
+    val context = LocalContext.current
+
+    LaunchedEffect(Unit) {
+        // pending apk in cache
+        val cached = UpdateManager.cachedApk(context)
+        val pendingVer = AppPrefs(context).pendingApkVersion()
+        if (cached != null && pendingVer > BuildConfig.VERSION_CODE) {
+            showInstallCached = cached
+        }
+        // remote check
+        UpdateManager.checkLatest()
+            .onSuccess { rel ->
+                if (rel != null && rel.versionCode > BuildConfig.VERSION_CODE) {
+                    updateInfo = rel
+                }
+            }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -446,6 +481,72 @@ fun VixHubApp(vm: AppViewModel = viewModel()) {
                 4 -> ServerUpdateScreen(vm)
             }
         }
+    }
+
+    // Update available
+    if (updateInfo != null && !updateDownloading) {
+        val rel = updateInfo!!
+        AlertDialog(
+            onDismissRequest = { updateInfo = null },
+            title = { Text("Доступно обновление") },
+            text = {
+                Text("Версия ${rel.versionName} (code ${rel.versionCode}). Сейчас: ${BuildConfig.VERSION_NAME}. Скачать в фоне?")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val rel2 = rel
+                    updateInfo = null
+                    updateDownloading = true
+                    kotlinx.coroutines.MainScope().launch {
+                        UpdateManager.notifyProgress(context, "VixHub · обновление", "Скачивание…", 0, 0, true)
+                        UpdateManager.downloadApk(context, rel2.apkUrl, rel2.versionCode) { d, t ->
+                            if (t > 0) {
+                                updateProgress = d.toFloat() / t
+                                UpdateManager.notifyProgress(
+                                    context, "VixHub · обновление",
+                                    "${d / 1024 / 1024}/${t / 1024 / 1024} МБ",
+                                    (d * 100 / t).toInt(), 100, true
+                                )
+                            }
+                        }.onSuccess { file ->
+                            updateDownloading = false
+                            UpdateManager.notifyDone(context, "Готово к установке")
+                            showInstallCached = file
+                        }.onFailure {
+                            updateDownloading = false
+                            UpdateManager.cancelNotif(context)
+                            vm.showMessage("Ошибка обновления: ${it.message}")
+                        }
+                    }
+                }) { Text("Скачать") }
+            },
+            dismissButton = {
+                TextButton(onClick = { updateInfo = null }) { Text("Позже") }
+            }
+        )
+    }
+
+    if (showInstallCached != null) {
+        AlertDialog(
+            onDismissRequest = { /* keep pending */ },
+            title = { Text("Установить обновление?") },
+            text = { Text("APK уже в кэше. Можно установить поверх текущей версии.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    try {
+                        UpdateManager.installApk(context, showInstallCached!!)
+                    } catch (e: Exception) {
+                        vm.showMessage("Разрешите установку приложений: ${e.message}")
+                    }
+                }) { Text("Установить") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showInstallCached = null
+                    // keep file in cache for next launch
+                }) { Text("Позже") }
+            }
+        )
     }
 }
 
@@ -544,8 +645,13 @@ fun StorageScreen(vm: AppViewModel) {
     var deleteGroupName by remember { mutableStateOf<String?>(null) }
     var fileMenu by remember { mutableStateOf<ApiClient.FileInfo?>(null) }
 
-    // list | gallery
+    // list | gallery — per-folder preference
     var viewMode by remember { mutableStateOf("list") }
+    LaunchedEffect(currentFolder) {
+        if (currentFolder != null) {
+            viewMode = vm.getViewMode(currentFolder!!)
+        }
+    }
 
     // previews
     var previewImage by remember { mutableStateOf<String?>(null) }
@@ -573,11 +679,16 @@ fun StorageScreen(vm: AppViewModel) {
         }
     }
 
+    var apkInstallName by remember { mutableStateOf<String?>(null) }
+    var apkProgress by remember { mutableStateOf<Pair<Long, Long>?>(null) }
+
     fun openFile(f: ApiClient.FileInfo) {
-        when (FileType.kind(f.name)) {
-            FileKind.IMAGE -> previewImage = f.name
-            FileKind.VIDEO -> previewVideo = f.name
-            FileKind.TEXT, FileKind.CODE -> previewText = f.name
+        val ext = FileType.ext(f.name)
+        when {
+            ext == "apk" -> apkInstallName = f.name
+            FileType.kind(f.name) == FileKind.IMAGE -> previewImage = f.name
+            FileType.kind(f.name) == FileKind.VIDEO -> previewVideo = f.name
+            FileType.kind(f.name) == FileKind.TEXT || FileType.kind(f.name) == FileKind.CODE -> previewText = f.name
             else -> fileMenu = f
         }
     }
@@ -642,6 +753,11 @@ fun StorageScreen(vm: AppViewModel) {
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
+                                if (g.protected && vm.folderKey(g.name) != null) {
+                                    TextButton(onClick = { vm.forgetPassword(g.name) }) {
+                                        Text("Забыть", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                }
                                 Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
@@ -658,7 +774,11 @@ fun StorageScreen(vm: AppViewModel) {
                     Text("${files.size} файл(ов)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 // view mode toggle
-                IconButton(onClick = { viewMode = if (viewMode == "list") "gallery" else "list" }) {
+                IconButton(onClick = {
+                    val next = if (viewMode == "list") "gallery" else "list"
+                    viewMode = next
+                    currentFolder?.let { vm.setViewMode(it, next) }
+                }) {
                     Icon(
                         if (viewMode == "list") Icons.Default.GridView else Icons.Default.ViewList,
                         contentDescription = "Вид"
@@ -675,10 +795,38 @@ fun StorageScreen(vm: AppViewModel) {
                 Text("Загрузить файлы (до 200 МБ)")
             }
             Text(
-                "Несколько файлов — очередь в фоне. Тап: открыть · долгое: меню",
+                "Несколько файлов — очередь в фоне. Тап: открыть · ⋮ / долгое: меню",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            val up by UploadProgress.state.collectAsState()
+            if (up.active || (up.done && up.total > 0)) {
+                Spacer(Modifier.height(8.dp))
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+                ) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            if (up.active) "Загрузка в «${up.folder}»: ${up.current}/${up.total}"
+                            else up.message,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        if (up.active) {
+                            LinearProgressIndicator(
+                                progress = { if (up.total == 0) 0f else up.current.toFloat() / up.total },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Text(up.currentName, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("Успешно: ${up.ok} · Ошибки: ${up.fail}", style = MaterialTheme.typography.labelSmall)
+                        } else {
+                            TextButton(onClick = { UploadProgress.clear(); vm.refreshFiles() }) {
+                                Text("Скрыть и обновить список")
+                            }
+                        }
+                    }
+                }
+            }
             Spacer(Modifier.height(12.dp))
 
             if (files.isEmpty()) {
@@ -773,16 +921,19 @@ fun StorageScreen(vm: AppViewModel) {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     items(files, key = { it.name }) { f ->
                         Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .combinedClickable(
-                                    onClick = { openFile(f) },
-                                    onLongClick = { fileMenu = f }
-                                ),
+                            modifier = Modifier.fillMaxWidth(),
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                             shape = RoundedCornerShape(10.dp)
                         ) {
-                            Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                Modifier
+                                    .combinedClickable(
+                                        onClick = { openFile(f) },
+                                        onLongClick = { fileMenu = f }
+                                    )
+                                    .padding(14.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 Icon(iconForKind(FileType.kind(f.name)), null, tint = MaterialTheme.colorScheme.primary)
                                 Spacer(Modifier.width(12.dp))
                                 Column(Modifier.weight(1f)) {
@@ -793,7 +944,9 @@ fun StorageScreen(vm: AppViewModel) {
                                     }
                                     Text(sub, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
-                                Icon(Icons.Default.MoreVert, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                IconButton(onClick = { fileMenu = f }) {
+                                    Icon(Icons.Default.MoreVert, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                             }
                         }
                     }
@@ -925,10 +1078,15 @@ fun StorageScreen(vm: AppViewModel) {
                     }
                     TextButton(
                         onClick = {
-                            val url = ApiClient.downloadUrl(folder, f.name, vm.folderKey(folder))
+                            val key = vm.folderKey(folder)
+                            val url = ApiClient.downloadUrl(folder, f.name, key)
                             val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
                             cm.setPrimaryClip(ClipData.newPlainText("url", url))
-                            vm.showMessage("Ссылка скопирована")
+                            if (!key.isNullOrBlank()) {
+                                vm.showMessage("Ссылка скопирована. ВНИМАНИЕ: в URL есть пароль папки (?key=…)")
+                            } else {
+                                vm.showMessage("Ссылка скопирована")
+                            }
                             fileMenu = null
                         },
                         modifier = Modifier.fillMaxWidth()
@@ -949,6 +1107,67 @@ fun StorageScreen(vm: AppViewModel) {
                 }
             },
             confirmButton = { TextButton(onClick = { fileMenu = null }) { Text("Закрыть") } }
+        )
+    }
+
+
+    // APK download + install
+    if (apkInstallName != null && currentFolder != null) {
+        val name = apkInstallName!!
+        AlertDialog(
+            onDismissRequest = { if (apkProgress == null) apkInstallName = null },
+            title = { Text("Установка APK") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(name)
+                    if (apkProgress != null) {
+                        val (d, t) = apkProgress!!
+                        val p = if (t > 0) d.toFloat() / t else 0f
+                        LinearProgressIndicator(progress = { p }, modifier = Modifier.fillMaxWidth())
+                        Text(
+                            if (t > 0) "${d / 1024 / 1024} / ${t / 1024 / 1024} МБ" else "Скачивание…",
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    } else {
+                        Text("Файл будет скачан во внутренний кэш и предложен к установке.")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = apkProgress == null,
+                    onClick = {
+                        val folder = currentFolder!!
+                        val key = vm.folderKey(folder)
+                        val scope = kotlinx.coroutines.MainScope()
+                        scope.launch {
+                            apkProgress = 0L to -1L
+                            ApiClient.downloadBytes(folder, name, key)
+                                .onSuccess { bytes ->
+                                    apkProgress = bytes.size.toLong() to bytes.size.toLong()
+                                    val dir = java.io.File(context.cacheDir, "updates").apply { mkdirs() }
+                                    val file = java.io.File(dir, name)
+                                    file.writeBytes(bytes)
+                                    AppPrefs(context).setPendingApkPath(file.absolutePath)
+                                    apkProgress = null
+                                    apkInstallName = null
+                                    try {
+                                        UpdateManager.installApk(context, file)
+                                    } catch (e: Exception) {
+                                        vm.showMessage("Разрешите установку из этого источника: ${e.message}")
+                                    }
+                                }
+                                .onFailure {
+                                    apkProgress = null
+                                    vm.showMessage("Ошибка: ${it.message}")
+                                }
+                        }
+                    }
+                ) { Text("Скачать и установить") }
+            },
+            dismissButton = {
+                TextButton(onClick = { apkInstallName = null; apkProgress = null }) { Text("Отмена") }
+            }
         )
     }
 
@@ -985,7 +1204,11 @@ fun StorageScreen(vm: AppViewModel) {
         VideoPlayerDialog(
             url = ApiClient.downloadUrl(currentFolder!!, previewVideo!!, vm.folderKey(currentFolder)),
             title = previewVideo!!,
-            onDismiss = { previewVideo = null }
+            onDismiss = { previewVideo = null },
+            onMenu = {
+                fileMenu = files.find { it.name == previewVideo }
+                previewVideo = null
+            }
         )
     }
 
@@ -1016,7 +1239,7 @@ private fun iconForKind(kind: FileKind) = when (kind) {
 }
 
 @Composable
-fun VideoPlayerDialog(url: String, title: String, onDismiss: () -> Unit) {
+fun VideoPlayerDialog(url: String, title: String, onDismiss: () -> Unit, onMenu: () -> Unit = {}) {
     val context = LocalContext.current
     val player = remember {
         val httpFactory = DefaultHttpDataSource.Factory()
@@ -1053,7 +1276,8 @@ fun VideoPlayerDialog(url: String, title: String, onDismiss: () -> Unit) {
                     .height(240.dp)
             )
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Закрыть") } }
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Закрыть") } },
+        dismissButton = { TextButton(onClick = onMenu) { Text("Меню") } }
     )
 }
 
