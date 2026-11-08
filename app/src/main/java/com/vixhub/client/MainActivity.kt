@@ -77,13 +77,16 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-sealed class Tab(val title: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
-    data object Status : Tab("Статус", Icons.Filled.MonitorHeart)
-    data object Storage : Tab("Файлы", Icons.Filled.Folder)
-    data object Database : Tab("База", Icons.Filled.Storage)
-    data object Scripts : Tab("Скрипты", Icons.Filled.Code)
-    data object Server : Tab("Сервер", Icons.Filled.CloudUpload)
-}
+data class MenuTile(val screen: String, val title: String, val icon: androidx.compose.ui.graphics.vector.ImageVector, val color: Color)
+
+val MenuTiles = listOf(
+    MenuTile("storage", "Файлы", Icons.Filled.Folder, Color(0xFF00D4FF)),
+    MenuTile("database", "Базы", Icons.Filled.Storage, Color(0xFF80CBC4)),
+    MenuTile("scripts", "Скрипты", Icons.Filled.Code, Color(0xFFFFB74D)),
+    MenuTile("sites", "Сайты", Icons.Filled.Language, Color(0xFFCE93D8)),
+    MenuTile("server", "Сервер", Icons.Filled.CloudUpload, Color(0xFFEF9A9A))
+)
+
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val prefs = AppPrefs(app)
@@ -276,6 +279,43 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun getViewMode(folder: String) = prefs.getViewMode(folder)
     fun setViewMode(folder: String, mode: String) = prefs.setViewMode(folder, mode)
+    fun getServerSecret() = prefs.getServerSecret()
+    fun setServerSecret(s: String) = prefs.setServerSecret(s)
+    fun getSites() = prefs.getSites()
+    fun addSite(id: String) = prefs.addSite(id)
+    fun removeSiteLocal(id: String) = prefs.removeSite(id)
+    fun getRecentDbs() = prefs.getRecentDbs()
+    fun addRecentDb(n: String) = prefs.addRecentDb(n)
+    fun getRecentScripts() = prefs.getRecentScripts()
+    fun addRecentScript(id: String) = prefs.addRecentScript(id)
+
+    fun deleteFilesBulk(names: List<String>) {
+        val folder = _currentFolder.value ?: return
+        viewModelScope.launch {
+            _loading.value = true
+            ApiClient.deleteFiles(folder, names, folderKey(folder))
+                .onSuccess { (ok, fail) ->
+                    showMessage("Удалено: $ok, ошибок: $fail")
+                    refreshFiles()
+                }
+                .onFailure { showMessage("Ошибка: ${it.message}") }
+            _loading.value = false
+        }
+    }
+
+    fun uploadSite(projectId: String, files: List<Pair<String, ByteArray>>, update: Boolean) {
+        viewModelScope.launch {
+            _loading.value = true
+            ApiClient.uploadWebsite(projectId, files, update)
+                .onSuccess {
+                    prefs.addSite(projectId)
+                    val url = it.optString("url", "/web/$projectId/")
+                    showMessage(it.optString("message", "OK") + " · " + url)
+                }
+                .onFailure { showMessage("Ошибка: ${it.message}") }
+            _loading.value = false
+        }
+    }
 
 
     // ── DB ──
@@ -382,11 +422,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun VixHubApp(vm: AppViewModel = viewModel()) {
-    var selectedTab by remember { mutableIntStateOf(0) }
-    val tabs = listOf(Tab.Status, Tab.Storage, Tab.Database, Tab.Scripts, Tab.Server)
+    var screen by remember { mutableStateOf("home") }
     val loading by vm.loading.collectAsState()
     val message by vm.message.collectAsState()
+    val status by vm.status.collectAsState()
+    val baseUrl by vm.baseUrl.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+    val context = LocalContext.current
 
     LaunchedEffect(message) {
         message?.let {
@@ -399,16 +441,13 @@ fun VixHubApp(vm: AppViewModel = viewModel()) {
     var updateDownloading by remember { mutableStateOf(false) }
     var updateProgress by remember { mutableStateOf(0f) }
     var showInstallCached by remember { mutableStateOf<java.io.File?>(null) }
-    val context = LocalContext.current
 
     LaunchedEffect(Unit) {
-        // pending apk in cache
         val cached = UpdateManager.cachedApk(context)
         val pendingVer = AppPrefs(context).pendingApkVersion()
         if (cached != null && pendingVer > BuildConfig.VERSION_CODE) {
             showInstallCached = cached
         }
-        // remote check
         UpdateManager.checkLatest()
             .onSuccess { rel ->
                 if (rel != null && rel.versionCode > BuildConfig.VERSION_CODE) {
@@ -424,10 +463,25 @@ fun VixHubApp(vm: AppViewModel = viewModel()) {
                     Column {
                         Text("VixHub", fontWeight = FontWeight.Bold)
                         Text(
-                            "Клиент сервера",
+                            when (screen) {
+                                "home" -> "Клиент сервера"
+                                "storage" -> "Файлы"
+                                "database" -> "Базы данных"
+                                "scripts" -> "Скрипты"
+                                "sites" -> "Сайты"
+                                "server" -> "Обновление сервера"
+                                else -> ""
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                    }
+                },
+                navigationIcon = {
+                    if (screen != "home") {
+                        IconButton(onClick = { screen = "home" }) {
+                            Icon(Icons.Default.ArrowBack, "Назад")
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -440,50 +494,28 @@ fun VixHubApp(vm: AppViewModel = viewModel()) {
                 }
             )
         },
-        bottomBar = {
-            NavigationBar(
-                containerColor = MaterialTheme.colorScheme.surface,
-                contentColor = MaterialTheme.colorScheme.onSurface,
-                tonalElevation = 0.dp
-            ) {
-                tabs.forEachIndexed { index, tab ->
-                    NavigationBarItem(
-                        selected = selectedTab == index,
-                        onClick = { selectedTab = index },
-                        icon = { Icon(tab.icon, contentDescription = tab.title) },
-                        label = {
-                            Text(tab.title, maxLines = 1, style = MaterialTheme.typography.labelSmall)
-                        },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = MaterialTheme.colorScheme.primary,
-                            selectedTextColor = MaterialTheme.colorScheme.primary,
-                            indicatorColor = MaterialTheme.colorScheme.primaryContainer,
-                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    )
-                }
-            }
-        },
         snackbarHost = { SnackbarHost(snackbarHostState) },
         floatingActionButton = {
-            if (loading) {
-                CircularProgressIndicator(modifier = Modifier.size(48.dp))
-            }
+            if (loading) CircularProgressIndicator(modifier = Modifier.size(48.dp))
         }
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
-            when (selectedTab) {
-                0 -> StatusScreen(vm)
-                1 -> StorageScreen(vm)
-                2 -> DatabaseScreen(vm)
-                3 -> ScriptsScreen(vm)
-                4 -> ServerUpdateScreen(vm)
+            when (screen) {
+                "home" -> HomeScreen(
+                    status = status,
+                    baseUrl = baseUrl,
+                    onOpen = { screen = it },
+                    onRefresh = { vm.refreshUrlAndHealth() }
+                )
+                "storage" -> StorageScreen(vm)
+                "database" -> DatabaseScreen(vm)
+                "scripts" -> ScriptsScreen(vm)
+                "sites" -> SitesScreen(vm)
+                "server" -> ServerUpdateScreen(vm)
             }
         }
     }
 
-    // Update available
     if (updateInfo != null && !updateDownloading) {
         val rel = updateInfo!!
         AlertDialog(
@@ -528,7 +560,7 @@ fun VixHubApp(vm: AppViewModel = viewModel()) {
 
     if (showInstallCached != null) {
         AlertDialog(
-            onDismissRequest = { /* keep pending */ },
+            onDismissRequest = { },
             title = { Text("Установить обновление?") },
             text = { Text("APK уже в кэше. Можно установить поверх текущей версии.") },
             confirmButton = {
@@ -541,16 +573,112 @@ fun VixHubApp(vm: AppViewModel = viewModel()) {
                 }) { Text("Установить") }
             },
             dismissButton = {
-                TextButton(onClick = {
-                    showInstallCached = null
-                    // keep file in cache for next launch
-                }) { Text("Позже") }
+                TextButton(onClick = { showInstallCached = null }) { Text("Позже") }
             }
         )
     }
 }
 
 @Composable
+fun HomeScreen(
+    status: String,
+    baseUrl: String,
+    onOpen: (String) -> Unit,
+    onRefresh: () -> Unit
+) {
+    val online = status.contains("Онлайн")
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        // Status card on top
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = if (online) Color(0xFF1B3D2F) else MaterialTheme.colorScheme.errorContainer
+            ),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Row(
+                Modifier.padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Icon(
+                    if (online) Icons.Default.CheckCircle else Icons.Default.Error,
+                    null,
+                    tint = if (online) Color(0xFF69F0AE) else MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(36.dp)
+                )
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        status,
+                        fontWeight = FontWeight.Bold,
+                        color = if (online) Color(0xFF69F0AE) else MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    Text(
+                        baseUrl.ifEmpty { "URL не загружен" },
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                IconButton(onClick = onRefresh) {
+                    Icon(Icons.Default.Refresh, null)
+                }
+            }
+        }
+
+        Text("Разделы", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+
+        // 2-column tiles
+        val tiles = MenuTiles
+        for (row in tiles.chunked(2)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                for (tile in row) {
+                    Card(
+                        modifier = Modifier
+                            .weight(1f)
+                            .aspectRatio(1.15f)
+                            .clickable { onOpen(tile.screen) },
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                        shape = RoundedCornerShape(20.dp)
+                    ) {
+                        Column(
+                            Modifier
+                                .fillMaxSize()
+                                .padding(16.dp),
+                            verticalArrangement = Arrangement.Center,
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Box(
+                                Modifier
+                                    .size(56.dp)
+                                    .background(tile.color.copy(alpha = 0.18f), RoundedCornerShape(16.dp)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(tile.icon, null, tint = tile.color, modifier = Modifier.size(30.dp))
+                            }
+                            Spacer(Modifier.height(12.dp))
+                            Text(tile.title, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
+                        }
+                    }
+                }
+                if (row.size == 1) Spacer(Modifier.weight(1f))
+            }
+        }
+    }
+}
+
+
 fun StatusScreen(vm: AppViewModel) {
     val baseUrl by vm.baseUrl.collectAsState()
     val status by vm.status.collectAsState()
@@ -644,6 +772,8 @@ fun StorageScreen(vm: AppViewModel) {
 
     var deleteGroupName by remember { mutableStateOf<String?>(null) }
     var fileMenu by remember { mutableStateOf<ApiClient.FileInfo?>(null) }
+    var selectMode by remember { mutableStateOf(false) }
+    var selectedFiles by remember { mutableStateOf(setOf<String>()) }
 
     // list | gallery — per-folder preference
     var viewMode by remember { mutableStateOf("list") }
@@ -766,26 +896,57 @@ fun StorageScreen(vm: AppViewModel) {
             }
         } else {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = { vm.closeFolder() }) {
+                IconButton(onClick = {
+                    if (selectMode) {
+                        selectMode = false
+                        selectedFiles = emptySet()
+                    } else vm.closeFolder()
+                }) {
                     Icon(Icons.Default.ArrowBack, "Назад")
                 }
                 Column(Modifier.weight(1f)) {
                     Text(currentFolder!!, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text("${files.size} файл(ов)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                // view mode toggle
-                IconButton(onClick = {
-                    val next = if (viewMode == "list") "gallery" else "list"
-                    viewMode = next
-                    currentFolder?.let { vm.setViewMode(it, next) }
-                }) {
-                    Icon(
-                        if (viewMode == "list") Icons.Default.GridView else Icons.Default.ViewList,
-                        contentDescription = "Вид"
+                    Text(
+                        if (selectMode) "Выбрано: ${selectedFiles.size}" else "${files.size} файл(ов)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                IconButton(onClick = { vm.refreshFiles() }) {
-                    Icon(Icons.Default.Refresh, null)
+                if (selectMode) {
+                    IconButton(onClick = {
+                        selectedFiles = if (selectedFiles.size == files.size) emptySet() else files.map { it.name }.toSet()
+                    }) {
+                        Icon(Icons.Default.DoneAll, null)
+                    }
+                    IconButton(
+                        onClick = {
+                            if (selectedFiles.isNotEmpty()) {
+                                vm.deleteFilesBulk(selectedFiles.toList())
+                                selectMode = false
+                                selectedFiles = emptySet()
+                            }
+                        },
+                        enabled = selectedFiles.isNotEmpty()
+                    ) {
+                        Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error)
+                    }
+                } else {
+                    IconButton(onClick = { selectMode = true }) {
+                        Icon(Icons.Default.DoneAll, null)
+                    }
+                    IconButton(onClick = {
+                        val next = if (viewMode == "list") "gallery" else "list"
+                        viewMode = next
+                        currentFolder?.let { vm.setViewMode(it, next) }
+                    }) {
+                        Icon(
+                            if (viewMode == "list") Icons.Default.GridView else Icons.Default.ViewList,
+                            contentDescription = "Вид"
+                        )
+                    }
+                    IconButton(onClick = { vm.refreshFiles() }) {
+                        Icon(Icons.Default.Refresh, null)
+                    }
                 }
             }
             Spacer(Modifier.height(8.dp))
@@ -928,12 +1089,33 @@ fun StorageScreen(vm: AppViewModel) {
                             Row(
                                 Modifier
                                     .combinedClickable(
-                                        onClick = { openFile(f) },
-                                        onLongClick = { fileMenu = f }
+                                        onClick = {
+                                            if (selectMode) {
+                                                selectedFiles = if (f.name in selectedFiles) selectedFiles - f.name else selectedFiles + f.name
+                                            } else openFile(f)
+                                        },
+                                        onLongClick = {
+                                            if (!selectMode) {
+                                                selectMode = true
+                                                selectedFiles = setOf(f.name)
+                                            } else fileMenu = f
+                                        }
                                     )
-                                    .padding(14.dp),
+                                    .padding(14.dp)
+                                    .then(
+                                        if (f.name in selectedFiles) Modifier.background(MaterialTheme.colorScheme.primary.copy(0.12f), RoundedCornerShape(10.dp))
+                                        else Modifier
+                                    ),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                if (selectMode) {
+                                    Checkbox(
+                                        checked = f.name in selectedFiles,
+                                        onCheckedChange = {
+                                            selectedFiles = if (it) selectedFiles + f.name else selectedFiles - f.name
+                                        }
+                                    )
+                                }
                                 Icon(iconForKind(FileType.kind(f.name)), null, tint = MaterialTheme.colorScheme.primary)
                                 Spacer(Modifier.width(12.dp))
                                 Column(Modifier.weight(1f)) {
@@ -1362,6 +1544,7 @@ fun DatabaseScreen(vm: AppViewModel) {
     var force by remember { mutableStateOf(false) }
     val result by vm.dbResult.collectAsState()
 
+    val recentDbs = remember { vm.getRecentDbs() }
     Column(
         Modifier
             .fillMaxSize()
@@ -1369,6 +1552,15 @@ fun DatabaseScreen(vm: AppViewModel) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        if (recentDbs.isNotEmpty()) {
+            Text("Недавние базы", fontWeight = FontWeight.SemiBold)
+            recentDbs.take(8).forEach { name ->
+                SuggestionChip(
+                    onClick = { dbName = name },
+                    label = { Text(name) }
+                )
+            }
+        }
         OutlinedTextField(value = dbName, onValueChange = { dbName = it }, label = { Text("Имя базы") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(value = path, onValueChange = { path = it }, label = { Text("Путь") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(value = value, onValueChange = { value = it }, label = { Text("Значение") }, minLines = 3, modifier = Modifier.fillMaxWidth())
@@ -1380,7 +1572,7 @@ fun DatabaseScreen(vm: AppViewModel) {
             Text("Force")
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            Button(onClick = { vm.dbGet(dbName, path) }, modifier = Modifier.weight(1f)) {
+            Button(onClick = { vm.addRecentDb(dbName); vm.dbGet(dbName, path) }, modifier = Modifier.weight(1f)) {
                 Icon(Icons.Default.Download, null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(4.dp))
                 Text("Читать")
@@ -1425,14 +1617,23 @@ fun ScriptsScreen(vm: AppViewModel) {
         }
         try {
             context.contentResolver.openInputStream(uri)?.use { stream ->
-                vm.loadScript(scriptId.trim(), stream.readBytes())
+                vm.addRecentScript(scriptId.trim()); vm.loadScript(scriptId.trim(), stream.readBytes())
             }
         } catch (e: Exception) {
             vm.showMessage("Ошибка файла: ${e.message}")
         }
     }
 
+    val recentScripts = remember { vm.getRecentScripts() }
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (recentScripts.isNotEmpty()) {
+            Text("Недавние скрипты", fontWeight = FontWeight.SemiBold)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                recentScripts.take(6).forEach { id ->
+                    SuggestionChip(onClick = { scriptId = id }, label = { Text(id) })
+                }
+            }
+        }
         OutlinedTextField(
             value = scriptId,
             onValueChange = { scriptId = it },
@@ -1483,10 +1684,175 @@ fun ScriptsScreen(vm: AppViewModel) {
     }
 }
 
+
+
+@Composable
+fun SitesScreen(vm: AppViewModel) {
+    val context = LocalContext.current
+    var sites by remember { mutableStateOf(vm.getSites()) }
+    var projectId by remember { mutableStateOf("") }
+    var isUpdate by remember { mutableStateOf(false) }
+    var pendingFiles by remember { mutableStateOf<List<Pair<String, ByteArray>>>(emptyList()) }
+
+    val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        val list = mutableListOf<Pair<String, ByteArray>>()
+        for (uri in uris) {
+            try {
+                val name = FileUtils.displayName(context, uri)
+                val bytes = FileUtils.readBytes(context, uri)
+                list.add(name to bytes)
+            } catch (e: Exception) {
+                vm.showMessage("Ошибка: ${e.message}")
+            }
+        }
+        pendingFiles = list
+    }
+
+    val pickZip = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        try {
+            val name = FileUtils.displayName(context, uri)
+            val bytes = FileUtils.readBytes(context, uri)
+            pendingFiles = listOf(name to bytes)
+        } catch (e: Exception) {
+            vm.showMessage("Ошибка: ${e.message}")
+        }
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text("Сайты", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Text(
+            "Загрузите ZIP или файлы (нужен index.html). Обновление заменяет все файлы проекта.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        OutlinedTextField(
+            value = projectId,
+            onValueChange = { projectId = it.filter { c -> c.isLetterOrDigit() || c == '_' || c == '-' } },
+            label = { Text("ID сайта (my_site)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(checked = isUpdate, onCheckedChange = { isUpdate = it })
+            Text("Обновить существующий (/up_web)")
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(onClick = { pickZip.launch("application/zip") }, modifier = Modifier.weight(1f)) {
+                Text("ZIP")
+            }
+            OutlinedButton(onClick = { pickFiles.launch("*/*") }, modifier = Modifier.weight(1f)) {
+                Text("Файлы")
+            }
+        }
+        if (pendingFiles.isNotEmpty()) {
+            Text("Выбрано: ${pendingFiles.joinToString { it.first }}", style = MaterialTheme.typography.labelSmall)
+        }
+        Button(
+            onClick = {
+                if (projectId.isBlank()) {
+                    vm.showMessage("Укажите ID сайта")
+                    return@Button
+                }
+                if (pendingFiles.isEmpty()) {
+                    vm.showMessage("Выберите файлы или ZIP")
+                    return@Button
+                }
+                vm.uploadSite(projectId.trim(), pendingFiles, isUpdate)
+                sites = listOf(projectId.trim()) + sites.filter { it != projectId.trim() }
+                pendingFiles = emptyList()
+            },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = projectId.isNotBlank() && pendingFiles.isNotEmpty()
+        ) {
+            Icon(Icons.Default.CloudUpload, null)
+            Spacer(Modifier.width(8.dp))
+            Text(if (isUpdate) "Обновить сайт" else "Создать сайт")
+        }
+
+        HorizontalDivider()
+        Text("Ваши сайты", fontWeight = FontWeight.SemiBold)
+        if (sites.isEmpty()) {
+            Text("Пока нет сохранённых сайтов", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            sites.forEach { id ->
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Row(
+                        Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.Language, null, tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(id, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                ApiClient.siteUrl(id).ifEmpty { "/web/$id/" },
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        IconButton(onClick = {
+                            val url = ApiClient.siteUrl(id)
+                            if (url.isNotBlank()) {
+                                try {
+                                    context.startActivity(
+                                        android.content.Intent(
+                                            android.content.Intent.ACTION_VIEW,
+                                            Uri.parse(url)
+                                        )
+                                    )
+                                } catch (e: Exception) {
+                                    vm.showMessage(e.message ?: "Ошибка")
+                                }
+                            } else vm.showMessage("URL ещё не загружен — обновите статус")
+                        }) {
+                            Icon(Icons.Default.OpenInNew, null)
+                        }
+                        IconButton(onClick = {
+                            val url = ApiClient.siteUrl(id)
+                            val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            cm.setPrimaryClip(ClipData.newPlainText("site", url))
+                            vm.showMessage("Ссылка скопирована")
+                        }) {
+                            Icon(Icons.Default.Link, null)
+                        }
+                        IconButton(onClick = {
+                            projectId = id
+                            isUpdate = true
+                            vm.showMessage("ID подставлен — выберите ZIP/файлы для обновления")
+                        }) {
+                            Icon(Icons.Default.Edit, null)
+                        }
+                        IconButton(onClick = {
+                            vm.removeSiteLocal(id)
+                            sites = vm.getSites()
+                        }) {
+                            Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 fun ServerUpdateScreen(vm: AppViewModel) {
     val context = LocalContext.current
-    var secret by remember { mutableStateOf("") }
+    var secret by remember { mutableStateOf(vm.getServerSecret()) }
     var selectedName by remember { mutableStateOf<String?>(null) }
     var selectedBytes by remember { mutableStateOf<ByteArray?>(null) }
     var confirmOpen by remember { mutableStateOf(false) }
@@ -1524,6 +1890,10 @@ fun ServerUpdateScreen(vm: AppViewModel) {
             visualTransformation = PasswordVisualTransformation(),
             modifier = Modifier.fillMaxWidth()
         )
+        TextButton(onClick = {
+            vm.setServerSecret(secret.trim())
+            vm.showMessage("Secret сохранён")
+        }) { Text("Сохранить secret") }
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
@@ -1566,7 +1936,7 @@ fun ServerUpdateScreen(vm: AppViewModel) {
             confirmButton = {
                 TextButton(onClick = {
                     confirmOpen = false
-                    vm.updateServer(secret.trim(), selectedBytes!!, selectedName ?: "server.py")
+                    vm.setServerSecret(secret.trim()); vm.updateServer(secret.trim(), selectedBytes!!, selectedName ?: "server.py")
                 }) { Text("Обновить") }
             },
             dismissButton = {

@@ -3,6 +3,9 @@ package com.vixhub.client
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
+import okhttp3.RequestBody.Companion.asRequestBody
+import java.io.File
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -432,4 +435,49 @@ object ApiClient {
             Result.failure(e)
         }
     }
+
+
+    // ─── Websites ───────────────────────────────────────────────────
+
+    suspend fun uploadWebsite(projectId: String, files: List<Pair<String, ByteArray>>, update: Boolean = false): Result<JSONObject> =
+        withContext(Dispatchers.IO) {
+            try {
+                val base = requireUrl()
+                val path = if (update) "up_web" else "new_web"
+                val enc = URLEncoder.encode(projectId, "UTF-8")
+                val mb = MultipartBody.Builder().setType(MultipartBody.FORM)
+                for ((name, bytes) in files) {
+                    mb.addFormDataPart(
+                        "file",
+                        name,
+                        bytes.toRequestBody("application/octet-stream".toMediaType())
+                    )
+                }
+                val request = authBuilder("$base/$path/$enc").post(mb.build()).build()
+                client.newCall(request).execute().use { response ->
+                    val text = response.body?.string() ?: "{}"
+                    if (response.isSuccessful) {
+                        Result.success(try { JSONObject(text) } catch (_: Exception) { JSONObject().put("message", text) })
+                    } else Result.failure(parseError(response.code, text))
+                }
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+
+    fun siteUrl(projectId: String): String {
+        if (baseUrl.isEmpty()) return ""
+        return "$baseUrl/web/$projectId/"
+    }
+
+    suspend fun deleteFiles(folder: String, names: List<String>, folderKey: String?): Result<Pair<Int, Int>> =
+        withContext(Dispatchers.IO) {
+            var ok = 0
+            var fail = 0
+            for (n in names) {
+                val r = deleteFile(folder, n, folderKey)
+                if (r.isSuccess) ok++ else fail++
+            }
+            Result.success(ok to fail)
+        }
 }
