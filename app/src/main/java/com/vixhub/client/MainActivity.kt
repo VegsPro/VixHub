@@ -12,6 +12,20 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -30,6 +44,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -499,8 +514,26 @@ fun VixHubApp(vm: AppViewModel = viewModel()) {
             if (loading) CircularProgressIndicator(modifier = Modifier.size(48.dp))
         }
     ) { padding ->
-        Box(Modifier.padding(padding).fillMaxSize()) {
-            when (screen) {
+        AnimatedContent(
+            targetState = screen,
+            modifier = Modifier.padding(padding).fillMaxSize(),
+            transitionSpec = {
+                val forward = targetState != "home" && initialState == "home"
+                val back = targetState == "home" && initialState != "home"
+                if (forward) {
+                    (slideInHorizontally(animationSpec = spring(stiffness = Spring.StiffnessMediumLow)) { it / 3 } + fadeIn(tween(220))) togetherWith
+                        (slideOutHorizontally(animationSpec = tween(200)) { -it / 5 } + fadeOut(tween(180)))
+                } else if (back) {
+                    (slideInHorizontally(animationSpec = spring(stiffness = Spring.StiffnessMediumLow)) { -it / 4 } + fadeIn(tween(220))) togetherWith
+                        (slideOutHorizontally(animationSpec = tween(200)) { it / 3 } + fadeOut(tween(180)))
+                } else {
+                    (fadeIn(tween(200)) + scaleIn(initialScale = 0.96f, animationSpec = tween(220))) togetherWith
+                        (fadeOut(tween(150)) + scaleOut(targetScale = 0.96f, animationSpec = tween(150)))
+                }
+            },
+            label = "screen"
+        ) { s ->
+            when (s) {
                 "home" -> HomeScreen(
                     status = status,
                     baseUrl = baseUrl,
@@ -644,13 +677,24 @@ fun HomeScreen(
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 for (tile in row) {
+                    val interaction = remember { MutableInteractionSource() }
+                    val pressed by interaction.collectIsPressedAsState()
+                    val scale = if (pressed) 0.94f else 1f
                     Card(
                         modifier = Modifier
                             .weight(1f)
                             .aspectRatio(1.15f)
-                            .clickable { onOpen(tile.screen) },
+                            .graphicsLayer {
+                                scaleX = scale
+                                scaleY = scale
+                            }
+                            .clickable(
+                                interactionSource = interaction,
+                                indication = null
+                            ) { onOpen(tile.screen) },
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                        shape = RoundedCornerShape(20.dp)
+                        shape = RoundedCornerShape(20.dp),
+                        elevation = CardDefaults.cardElevation(defaultElevation = if (pressed) 2.dp else 6.dp)
                     ) {
                         Column(
                             Modifier
@@ -679,6 +723,7 @@ fun HomeScreen(
 }
 
 
+@Composable
 fun StatusScreen(vm: AppViewModel) {
     val baseUrl by vm.baseUrl.collectAsState()
     val status by vm.status.collectAsState()
@@ -1103,7 +1148,7 @@ fun StorageScreen(vm: AppViewModel) {
                                     )
                                     .padding(14.dp)
                                     .then(
-                                        if (f.name in selectedFiles) Modifier.background(MaterialTheme.colorScheme.primary.copy(0.12f), RoundedCornerShape(10.dp))
+                                        if (f.name in selectedFiles) Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f), RoundedCornerShape(10.dp))
                                         else Modifier
                                     ),
                                 verticalAlignment = Alignment.CenterVertically
