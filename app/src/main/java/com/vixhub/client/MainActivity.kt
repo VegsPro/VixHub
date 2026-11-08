@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -438,6 +439,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 @Composable
 fun VixHubApp(vm: AppViewModel = viewModel()) {
     var screen by remember { mutableStateOf("home") }
+    BackHandler(enabled = screen != "home") {
+        screen = "home"
+    }
     val loading by vm.loading.collectAsState()
     val message by vm.message.collectAsState()
     val status by vm.status.collectAsState()
@@ -820,6 +824,17 @@ fun StorageScreen(vm: AppViewModel) {
     var selectMode by remember { mutableStateOf(false) }
     var selectedFiles by remember { mutableStateOf(setOf<String>()) }
 
+    // Системная «Назад»: выбор → папка → не выходим из приложения (обрабатывает родитель)
+    BackHandler(enabled = selectMode || currentFolder != null) {
+        when {
+            selectMode -> {
+                selectMode = false
+                selectedFiles = emptySet()
+            }
+            currentFolder != null -> vm.closeFolder()
+        }
+    }
+
     // list | gallery — per-folder preference
     var viewMode by remember { mutableStateOf("list") }
     LaunchedEffect(currentFolder) {
@@ -1050,14 +1065,25 @@ fun StorageScreen(vm: AppViewModel) {
                 ) {
                     gridItems(media, key = { "m-" + it.name }) { f ->
                         val url = ApiClient.downloadUrl(currentFolder!!, f.name, vm.folderKey(currentFolder))
+                        val selected = f.name in selectedFiles
                         Card(
                             modifier = Modifier
                                 .aspectRatio(1f)
                                 .combinedClickable(
-                                    onClick = { openFile(f) },
-                                    onLongClick = { fileMenu = f }
+                                    onClick = {
+                                        if (selectMode) {
+                                            selectedFiles = if (selected) selectedFiles - f.name else selectedFiles + f.name
+                                        } else openFile(f)
+                                    },
+                                    onLongClick = {
+                                        if (!selectMode) {
+                                            selectMode = true
+                                            selectedFiles = setOf(f.name)
+                                        } else fileMenu = f
+                                    }
                                 ),
-                            shape = RoundedCornerShape(12.dp)
+                            shape = RoundedCornerShape(12.dp),
+                            border = if (selected) androidx.compose.foundation.BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null
                         ) {
                             Box {
                                 if (FileType.kind(f.name) == FileKind.VIDEO) {
@@ -1096,29 +1122,60 @@ fun StorageScreen(vm: AppViewModel) {
                                         overflow = TextOverflow.Ellipsis
                                     )
                                 }
+                                if (selectMode) {
+                                    Checkbox(
+                                        checked = selected,
+                                        onCheckedChange = {
+                                            selectedFiles = if (it) selectedFiles + f.name else selectedFiles - f.name
+                                        },
+                                        modifier = Modifier.align(Alignment.TopStart).padding(2.dp)
+                                    )
+                                }
                             }
                         }
                     }
                     // non-media as small cards
                     gridItems(other, key = { "o-" + it.name }) { f ->
+                        val selected = f.name in selectedFiles
                         Card(
                             modifier = Modifier
                                 .aspectRatio(1f)
                                 .combinedClickable(
-                                    onClick = { openFile(f) },
-                                    onLongClick = { fileMenu = f }
+                                    onClick = {
+                                        if (selectMode) {
+                                            selectedFiles = if (selected) selectedFiles - f.name else selectedFiles + f.name
+                                        } else openFile(f)
+                                    },
+                                    onLongClick = {
+                                        if (!selectMode) {
+                                            selectMode = true
+                                            selectedFiles = setOf(f.name)
+                                        } else fileMenu = f
+                                    }
                                 ),
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                            shape = RoundedCornerShape(12.dp)
+                            shape = RoundedCornerShape(12.dp),
+                            border = if (selected) androidx.compose.foundation.BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null
                         ) {
-                            Column(
-                                Modifier.fillMaxSize().padding(8.dp),
-                                verticalArrangement = Arrangement.Center,
-                                horizontalAlignment = Alignment.CenterHorizontally
-                            ) {
-                                Icon(iconForKind(FileType.kind(f.name)), null, tint = MaterialTheme.colorScheme.primary)
-                                Spacer(Modifier.height(6.dp))
-                                Text(f.name, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Box(Modifier.fillMaxSize()) {
+                                Column(
+                                    Modifier.fillMaxSize().padding(8.dp),
+                                    verticalArrangement = Arrangement.Center,
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Icon(iconForKind(FileType.kind(f.name)), null, tint = MaterialTheme.colorScheme.primary)
+                                    Spacer(Modifier.height(6.dp))
+                                    Text(f.name, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                }
+                                if (selectMode) {
+                                    Checkbox(
+                                        checked = selected,
+                                        onCheckedChange = {
+                                            selectedFiles = if (it) selectedFiles + f.name else selectedFiles - f.name
+                                        },
+                                        modifier = Modifier.align(Alignment.TopStart).padding(4.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -1734,7 +1791,12 @@ fun ScriptsScreen(vm: AppViewModel) {
 @Composable
 fun SitesScreen(vm: AppViewModel) {
     val context = LocalContext.current
+    val baseUrl by vm.baseUrl.collectAsState()
     var sites by remember { mutableStateOf(vm.getSites()) }
+    fun siteLink(id: String): String {
+        val base = baseUrl.ifBlank { ApiClient.getBaseUrl() }.trimEnd('/')
+        return if (base.isBlank()) "/web/$id/" else "$base/web/$id/"
+    }
     var projectId by remember { mutableStateOf("") }
     var isUpdate by remember { mutableStateOf(false) }
     var pendingFiles by remember { mutableStateOf<List<Pair<String, ByteArray>>>(emptyList()) }
@@ -1842,7 +1904,7 @@ fun SitesScreen(vm: AppViewModel) {
                         Column(Modifier.weight(1f)) {
                             Text(id, fontWeight = FontWeight.SemiBold)
                             Text(
-                                ApiClient.siteUrl(id).ifEmpty { "/web/$id/" },
+                                siteLink(id).ifEmpty { "/web/$id/" },
                                 style = MaterialTheme.typography.labelSmall,
                                 fontFamily = FontFamily.Monospace,
                                 maxLines = 1,
@@ -1850,7 +1912,7 @@ fun SitesScreen(vm: AppViewModel) {
                             )
                         }
                         IconButton(onClick = {
-                            val url = ApiClient.siteUrl(id)
+                            val url = siteLink(id)
                             if (url.isNotBlank()) {
                                 try {
                                     context.startActivity(
@@ -1867,7 +1929,7 @@ fun SitesScreen(vm: AppViewModel) {
                             Icon(Icons.Default.OpenInNew, null)
                         }
                         IconButton(onClick = {
-                            val url = ApiClient.siteUrl(id)
+                            val url = siteLink(id)
                             val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
                             cm.setPrimaryClip(ClipData.newPlainText("site", url))
                             vm.showMessage("Ссылка скопирована")
