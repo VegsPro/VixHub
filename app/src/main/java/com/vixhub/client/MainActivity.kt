@@ -623,7 +623,6 @@ fun HomeScreen(
     onOpen: (String) -> Unit,
     onRefresh: () -> Unit
 ) {
-    val online = status.contains("Онлайн")
     Column(
         Modifier
             .fillMaxSize()
@@ -631,46 +630,6 @@ fun HomeScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // Status card on top
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = if (online) Color(0xFF1B3D2F) else MaterialTheme.colorScheme.errorContainer
-            ),
-            shape = RoundedCornerShape(16.dp)
-        ) {
-            Row(
-                Modifier.padding(16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Icon(
-                    if (online) Icons.Default.CheckCircle else Icons.Default.Error,
-                    null,
-                    tint = if (online) Color(0xFF69F0AE) else MaterialTheme.colorScheme.error,
-                    modifier = Modifier.size(36.dp)
-                )
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        status,
-                        fontWeight = FontWeight.Bold,
-                        color = if (online) Color(0xFF69F0AE) else MaterialTheme.colorScheme.onErrorContainer
-                    )
-                    Text(
-                        baseUrl.ifEmpty { "URL не загружен" },
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = FontFamily.Monospace,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                IconButton(onClick = onRefresh) {
-                    Icon(Icons.Default.Refresh, null)
-                }
-            }
-        }
-
         Text("Разделы", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
 
         // 2-column tiles
@@ -1363,13 +1322,13 @@ fun StorageScreen(vm: AppViewModel) {
                     TextButton(
                         onClick = {
                             val key = vm.folderKey(folder)
-                            val url = ApiClient.downloadUrl(folder, f.name, key)
+                            val url = ApiClient.publicDownloadUrl(folder, f.name, key)
                             val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
                             cm.setPrimaryClip(ClipData.newPlainText("url", url))
                             if (!key.isNullOrBlank()) {
-                                vm.showMessage("Ссылка скопирована. ВНИМАНИЕ: в URL есть пароль папки (?key=…)")
+                                vm.showMessage("Ссылка скопирована (vix). ВНИМАНИЕ: в URL есть пароль папки (?key=…)")
                             } else {
-                                vm.showMessage("Ссылка скопирована")
+                                vm.showMessage("Ссылка скопирована (vix)")
                             }
                             fileMenu = null
                         },
@@ -1793,10 +1752,7 @@ fun SitesScreen(vm: AppViewModel) {
     val context = LocalContext.current
     val baseUrl by vm.baseUrl.collectAsState()
     var sites by remember { mutableStateOf(vm.getSites()) }
-    fun siteLink(id: String): String {
-        val base = baseUrl.ifBlank { ApiClient.getBaseUrl() }.trimEnd('/')
-        return if (base.isBlank()) "/web/$id/" else "$base/web/$id/"
-    }
+    fun siteLink(id: String): String = ApiClient.siteUrl(id)
     var projectId by remember { mutableStateOf("") }
     var isUpdate by remember { mutableStateOf(false) }
     var pendingFiles by remember { mutableStateOf<List<Pair<String, ByteArray>>>(emptyList()) }

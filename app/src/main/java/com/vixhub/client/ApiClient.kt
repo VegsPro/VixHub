@@ -17,6 +17,8 @@ import java.util.concurrent.TimeUnit
 object ApiClient {
     private const val TOKEN = "xQ9_mL2pR5tY_7vB3nM8kL1jH4gF6dS2a"
     private const val FIREBASE_URL = "https://vix-hub-3caca-default-rtdb.firebaseio.com/base_url.json"
+    /** Публичный прокси для ссылок (копирование / открытие в браузере) */
+    const val PUBLIC_BASE = "https://vix.mstrblock.workers.dev"
 
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -466,8 +468,19 @@ object ApiClient {
         }
 
     fun siteUrl(projectId: String): String {
-        if (baseUrl.isEmpty()) return ""
-        return "$baseUrl/web/$projectId/"
+        val id = projectId.trim().trim('/')
+        return "$PUBLIC_BASE/web/$id/"
+    }
+
+    /** Ссылка для шаринга/браузера (через vix-прокси), не для API-запросов */
+    fun publicDownloadUrl(folder: String, filename: String, folderKey: String?): String {
+        val encFolder = URLEncoder.encode(folder, "UTF-8")
+        val encName = URLEncoder.encode(filename, "UTF-8")
+        var url = "$PUBLIC_BASE/download/$encFolder/$encName"
+        if (!folderKey.isNullOrBlank()) {
+            url += "?key=${URLEncoder.encode(folderKey, "UTF-8")}"
+        }
+        return url
     }
 
     suspend fun deleteFiles(folder: String, names: List<String>, folderKey: String?): Result<Pair<Int, Int>> =
