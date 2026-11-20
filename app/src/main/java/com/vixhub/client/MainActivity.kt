@@ -411,7 +411,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun updateServer(secret: String, bytes: ByteArray, filename: String) {
         viewModelScope.launch {
             _loading.value = true
-            ApiClient.updateServer(secret, bytes)
+            ApiClient.updateServer(secret, bytes, filename)
                 .onSuccess { msg ->
                     showMessage(msg)
                     kotlinx.coroutines.delay(2500)
@@ -1706,7 +1706,7 @@ fun ScriptsScreen(vm: AppViewModel) {
             Button(onClick = { pickScript.launch("*/*") }, modifier = Modifier.weight(1f)) {
                 Icon(Icons.Default.UploadFile, null)
                 Spacer(Modifier.width(4.dp))
-                Text("Загрузить .py")
+                Text("Загрузить .py / скрипт")
             }
             OutlinedButton(
                 onClick = { if (scriptId.isNotBlank()) vm.stopScript(scriptId.trim()) },
@@ -1920,12 +1920,13 @@ fun ServerUpdateScreen(vm: AppViewModel) {
     var selectedBytes by remember { mutableStateOf<ByteArray?>(null) }
     var confirmOpen by remember { mutableStateOf(false) }
 
-    val pickPy = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+    val pickGo = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         uri ?: return@rememberLauncherForActivityResult
         try {
             context.contentResolver.openInputStream(uri)?.use { stream ->
                 selectedBytes = stream.readBytes()
-                selectedName = uri.lastPathSegment?.substringAfterLast('/') ?: "main.go"
+                val name = uri.lastPathSegment?.substringAfterLast('/') ?: "main.go"
+                selectedName = if (name.contains('.')) name else "main.go"
             }
         } catch (e: Exception) {
             vm.showMessage("Ошибка файла: ${e.message}")
@@ -1967,10 +1968,10 @@ fun ServerUpdateScreen(vm: AppViewModel) {
                     selectedName?.let { "$it (${selectedBytes?.size ?: 0} байт)" } ?: "Файл не выбран",
                     color = if (selectedName == null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary
                 )
-                OutlinedButton(onClick = { pickPy.launch("*/*") }, modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(onClick = { pickGo.launch("*/*") }, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Default.AttachFile, null)
                     Spacer(Modifier.width(8.dp))
-                    Text("Выбрать .py")
+                    Text("Выбрать main.go")
                 }
             }
         }

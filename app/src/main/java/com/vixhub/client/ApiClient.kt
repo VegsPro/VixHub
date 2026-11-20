@@ -468,25 +468,32 @@ object ApiClient {
             }
         }
 
-    suspend fun updateServer(secret: String, bytes: ByteArray): Result<String> = withContext(Dispatchers.IO) {
-        try {
-            val base = requireUrl()
-            if (secret.isBlank()) return@withContext Result.failure(Exception("Укажите secret"))
-            if (bytes.isEmpty()) return@withContext Result.failure(Exception("Пустой файл"))
-            val url = "$base/update_server?secret=${URLEncoder.encode(secret, "UTF-8")}"
-            val body = bytes.toRequestBody("text/x-go; charset=utf-8".toMediaType())
-            val request = authBuilder(url).post(body).build()
-            client.newCall(request).execute().use { response ->
-                val text = response.body?.string() ?: ""
-                if (response.isSuccessful) {
-                    val msg = try { JSONObject(text).optString("message", text) } catch (_: Exception) { text.ifBlank { "OK" } }
-                    Result.success(msg)
-                } else Result.failure(parseError(response.code, text))
+    suspend fun updateServer(secret: String, bytes: ByteArray, filename: String = "main.go"): Result<String> =
+        withContext(Dispatchers.IO) {
+            try {
+                val base = requireUrl()
+                if (secret.isBlank()) return@withContext Result.failure(Exception("Укажите secret"))
+                if (bytes.isEmpty()) return@withContext Result.failure(Exception("Пустой файл"))
+                val fname = filename.ifBlank { "main.go" }
+                // Raw body (как в старом API) + имя файла в query — совместимо с Go update_server
+                val url = "$base/update_server?secret=${URLEncoder.encode(secret, "UTF-8")}" +
+                    "&filename=${URLEncoder.encode(fname, "UTF-8")}"
+                val body = bytes.toRequestBody("application/octet-stream".toMediaType())
+                val request = authBuilder(url)
+                    .addHeader("X-Filename", fname)
+                    .post(body)
+                    .build()
+                client.newCall(request).execute().use { response ->
+                    val text = response.body?.string() ?: ""
+                    if (response.isSuccessful) {
+                        val msg = try { JSONObject(text).optString("message", text) } catch (_: Exception) { text.ifBlank { "OK" } }
+                        Result.success(msg)
+                    } else Result.failure(parseError(response.code, text))
+                }
+            } catch (e: Exception) {
+                Result.failure(e)
             }
-        } catch (e: Exception) {
-            Result.failure(e)
         }
-    }
 
 
     // ─── Websites ───────────────────────────────────────────────────
