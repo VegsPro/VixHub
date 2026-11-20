@@ -21,8 +21,8 @@ android {
         applicationId = "com.vixhub.client"
         minSdk = 26
         targetSdk = 35
-        versionCode = 20
-        versionName = "1.6.2"
+        versionCode = 21
+        versionName = "1.6.3"
     }
 
     signingConfigs {
