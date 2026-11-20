@@ -25,6 +25,12 @@ object ApiClient {
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(5, TimeUnit.MINUTES)
             .writeTimeout(5, TimeUnit.MINUTES)
+            .addInterceptor { chain ->
+                val req = chain.request().newBuilder()
+                    .header("User-Agent", "VixHub-Android/1.6 OkHttp")
+                    .build()
+                chain.proceed(req)
+            }
             .build()
     }
 
@@ -198,58 +204,102 @@ object ApiClient {
         withContext(Dispatchers.IO) {
             try {
                 val base = requireUrl()
-                val enc = URLEncoder.encode(folder, "UTF-8")
-                val request = authBuilder("$base/list/$enc", folderKey).get().build()
-                client.newCall(request).execute().use { response ->
-                    val text = response.body?.string() ?: "[]"
-                    if (!response.isSuccessful) return@use Result.failure(parseError(response.code, text))
-                    val list = mutableListOf<FileInfo>()
-                    val trimmed = text.trim()
-                    when {
-                        trimmed.startsWith("[") -> {
-                            val arr = JSONArray(trimmed)
-                            for (i in 0 until arr.length()) {
-                                when (val item = arr.opt(i)) {
-                                    is JSONObject -> {
-                                        val n = item.optString("name").ifBlank { item.optString("filename") }.ifBlank { item.optString("file") }
-                                        val sz = if (item.has("size")) item.optLong("size") else null
-                                        if (n.isNotBlank()) list.add(FileInfo(n, sz))
-                                    }
-                                    is String -> list.add(FileInfo(item))
-                                }
+                val enc = URLEncoder.encode(folder, "UTF-8").replace("+", "%20")
+                // Go-сервер: сначала JSON /list/, при 404 — HTML-листинг /download/<folder>/
+                val attempts = listOf(
+                    "$base/list/$enc",
+                    "$base/download/$enc/",
+                    "$base/download/$enc"
+                )
+                var lastError: Exception? = null
+                for (url in attempts) {
+                    try {
+                        val request = authBuilder(url, folderKey).get().build()
+                        client.newCall(request).execute().use { response ->
+                            val text = response.body?.string() ?: ""
+                            if (response.code == 429) {
+                                return@withContext Result.failure(parseError(429, text))
+                            }
+                            if (!response.isSuccessful) {
+                                lastError = parseError(response.code, text)
+                                return@use
+                            }
+                            val list = parseFileList(text)
+                            if (list.isNotEmpty() || response.isSuccessful) {
+                                return@withContext Result.success(list.sortedBy { it.name.lowercase() })
                             }
                         }
-                        trimmed.startsWith("{") -> {
-                            val obj = JSONObject(trimmed)
-                            val arr = obj.optJSONArray("files") ?: obj.optJSONArray("data") ?: obj.optJSONArray("list")
-                            if (arr != null) {
-                                for (i in 0 until arr.length()) {
-                                    when (val item = arr.opt(i)) {
-                                        is JSONObject -> {
-                                            val n = item.optString("name").ifBlank { item.optString("filename") }
-                                            val sz = if (item.has("size")) item.optLong("size") else null
-                                            if (n.isNotBlank()) list.add(FileInfo(n, sz))
-                                        }
-                                        is String -> list.add(FileInfo(item))
-                                    }
-                                }
-                            } else {
-                                val keys = obj.keys()
-                                while (keys.hasNext()) {
-                                    val k = keys.next()
-                                    if (k in listOf("status", "message", "count", "protected")) continue
-                                    list.add(FileInfo(k))
-                                }
-                            }
-                        }
+                    } catch (e: Exception) {
+                        lastError = e
                     }
-                    list.sortBy { it.name.lowercase() }
-                    Result.success(list)
                 }
+                Result.failure(lastError ?: Exception("Не удалось получить список файлов"))
             } catch (e: Exception) {
                 Result.failure(e)
             }
         }
+
+    /** Парсит JSON-массив/объект или HTML-каталог Go net/http FileServer */
+    private fun parseFileList(text: String): List<FileInfo> {
+        val list = mutableListOf<FileInfo>()
+        val trimmed = text.trim()
+        try {
+            when {
+                trimmed.startsWith("[") -> {
+                    val arr = JSONArray(trimmed)
+                    for (i in 0 until arr.length()) {
+                        when (val item = arr.opt(i)) {
+                            is JSONObject -> {
+                                val n = item.optString("name")
+                                    .ifBlank { item.optString("filename") }
+                                    .ifBlank { item.optString("file") }
+                                val sz = if (item.has("size")) item.optLong("size") else null
+                                if (n.isNotBlank() && n != "." && n != "..") list.add(FileInfo(n, sz))
+                            }
+                            is String -> if (item.isNotBlank() && item != "." && item != "..") list.add(FileInfo(item))
+                        }
+                    }
+                }
+                trimmed.startsWith("{") -> {
+                    val obj = JSONObject(trimmed)
+                    val arr = obj.optJSONArray("files") ?: obj.optJSONArray("data") ?: obj.optJSONArray("list")
+                    if (arr != null) {
+                        for (i in 0 until arr.length()) {
+                            when (val item = arr.opt(i)) {
+                                is JSONObject -> {
+                                    val n = item.optString("name")
+                                        .ifBlank { item.optString("filename") }
+                                        .ifBlank { item.optString("file") }
+                                    val sz = if (item.has("size")) item.optLong("size") else null
+                                    if (n.isNotBlank()) list.add(FileInfo(n, sz))
+                                }
+                                is String -> list.add(FileInfo(item))
+                            }
+                        }
+                    }
+                }
+                else -> {
+                    // HTML: <a href="name">name</a> (Go file server)
+                    val re = Regex("""(?i)<a\s+[^>]*href=["']([^"']+)["'][^>]*>([^<]*)</a>""")
+                    for (match in re.findAll(trimmed)) {
+                        var href = match.groupValues[1].trim()
+                        if (href.startsWith("?") || href.startsWith("#")) continue
+                        // strip query / trailing slash for dirs
+                        href = href.substringBefore("?").trimEnd('/')
+                        if (href.isBlank() || href == "." || href == "..") continue
+                        // only basename
+                        val name = href.substringAfterLast('/').let {
+                            try { java.net.URLDecoder.decode(it, "UTF-8") } catch (_: Exception) { it }
+                        }
+                        if (name.isBlank() || name.equals("Parent Directory", true)) continue
+                        if (list.none { it.name == name }) list.add(FileInfo(name))
+                    }
+                }
+            }
+        } catch (_: Exception) { /* empty */ }
+        return list
+    }
+
 
     suspend fun uploadFile(folder: String, filename: String, bytes: ByteArray, folderKey: String?): Result<String> =
         withContext(Dispatchers.IO) {
@@ -424,7 +474,7 @@ object ApiClient {
             if (secret.isBlank()) return@withContext Result.failure(Exception("Укажите secret"))
             if (bytes.isEmpty()) return@withContext Result.failure(Exception("Пустой файл"))
             val url = "$base/update_server?secret=${URLEncoder.encode(secret, "UTF-8")}"
-            val body = bytes.toRequestBody("text/x-python; charset=utf-8".toMediaType())
+            val body = bytes.toRequestBody("text/x-go; charset=utf-8".toMediaType())
             val request = authBuilder(url).post(body).build()
             client.newCall(request).execute().use { response ->
                 val text = response.body?.string() ?: ""

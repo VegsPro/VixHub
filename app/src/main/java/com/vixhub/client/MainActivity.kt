@@ -1925,7 +1925,7 @@ fun ServerUpdateScreen(vm: AppViewModel) {
         try {
             context.contentResolver.openInputStream(uri)?.use { stream ->
                 selectedBytes = stream.readBytes()
-                selectedName = uri.lastPathSegment?.substringAfterLast('/') ?: "server.py"
+                selectedName = uri.lastPathSegment?.substringAfterLast('/') ?: "main.go"
             }
         } catch (e: Exception) {
             vm.showMessage("Ошибка файла: ${e.message}")
@@ -1939,9 +1939,9 @@ fun ServerUpdateScreen(vm: AppViewModel) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Text("Обновление server.py", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Text("Обновление main.go", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         Text(
-            "POST /update_server?secret=… + Bearer. Сервер проверяет compile(), делает .bak и перезапускается через ~1.5 с.",
+            "POST /update_server?secret=… + Bearer. Go-сервер (main.go): бэкап .bak и перезапуск процесса.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -1962,7 +1962,7 @@ fun ServerUpdateScreen(vm: AppViewModel) {
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
         ) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Файл server.py", fontWeight = FontWeight.SemiBold)
+                Text("Файл main.go", fontWeight = FontWeight.SemiBold)
                 Text(
                     selectedName?.let { "$it (${selectedBytes?.size ?: 0} байт)" } ?: "Файл не выбран",
                     color = if (selectedName == null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary
@@ -1999,7 +1999,7 @@ fun ServerUpdateScreen(vm: AppViewModel) {
             confirmButton = {
                 TextButton(onClick = {
                     confirmOpen = false
-                    vm.setServerSecret(secret.trim()); vm.updateServer(secret.trim(), selectedBytes!!, selectedName ?: "server.py")
+                    vm.setServerSecret(secret.trim()); vm.updateServer(secret.trim(), selectedBytes!!, selectedName ?: "main.go")
                 }) { Text("Обновить") }
             },
             dismissButton = {
